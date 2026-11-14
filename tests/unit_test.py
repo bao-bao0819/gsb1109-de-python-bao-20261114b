@@ -386,5 +386,132 @@ And this shouldn't break.
         }
 
 
+class MergeTest(unittest.TestCase):
+    """
+    Tests for merging parallel metadata edits (frontmatter.merge)
+    """
+
+    def setUp(self):
+        from frontmatter.merge import Change, Freeze, merge_metadata, merge_posts
+
+        self.Change = Change
+        self.Freeze = Freeze
+        self.merge_metadata = merge_metadata
+        self.merge_posts = merge_posts
+
+        self.base = {
+            "source": "old-source",
+            "category": "uncategorized",
+            "meta": {"id": 42, "note": "keep"},
+        }
+        self.permissions = {
+            "supplier-a": ["source"],
+            "supplier-b": ["category"],
+            "editor": ["meta"],
+        }
+
+    def reasons(self, result):
+        return [r.reason for r in result.rejected]
+
+    def test_permission_scoping(self):
+        "Each supplier may only change the fields granted to them"
+        changes = [
+            self.Change("supplier-a", "source", "new-source"),
+            self.Change("supplier-a", "category", "essay"),
+            self.Change("supplier-b", "category", "review"),
+        ]
+        result = self.merge_metadata(self.base, changes, self.permissions)
+
+        self.assertEqual(result.metadata["source"], "new-source")
+        self.assertEqual(result.metadata["category"], "review")
+        self.assertEqual(
+            self.reasons(result), ["'supplier-a' may not modify 'category'"]
+        )
+
+    def test_freeze_blocks_late_changes(self):
+        "Changes effective at or after the freeze version are rejected"
+        freezes = [self.Freeze(["meta"], version=5)]
+        changes = [
+            self.Change("editor", "meta.note", "updated", effective_version=6),
+        ]
+        result = self.merge_metadata(self.base, changes, self.permissions, freezes)
+
+        self.assertEqual(result.metadata["meta"]["note"], "keep")
+        self.assertEqual(
+            self.reasons(result), ["'meta.note' is frozen since version 5"]
+        )
+
+    def test_pre_freeze_approval_honored(self):
+        "Approved before the freeze, delivered after: effective version wins"
+        freezes = [self.Freeze(["meta"], version=5)]
+        changes = [
+            self.Change("editor", "meta.id", 43, effective_version=4),
+        ]
+        result = self.merge_metadata(self.base, changes, self.permissions, freezes)
+
+        self.assertEqual(result.metadata["meta"]["id"], 43)
+        self.assertEqual(result.rejected, [])
+
+    def test_conflict_without_order_keeps_both(self):
+        "Competing changes with no provable order keep both candidates"
+        changes = [
+            self.Change("supplier-a", "source", "x"),
+            self.Change("editor", "source", "y"),
+        ]
+        permissions = {"supplier-a": ["source"], "editor": ["source"]}
+        result = self.merge_metadata({"source": "old"}, changes, permissions)
+
+        # base value untouched, both candidates preserved
+        self.assertEqual(result.metadata["source"], "old")
+        self.assertEqual(len(result.conflicts), 1)
+        self.assertEqual(result.conflicts[0].values, ["x", "y"])
+        self.assertEqual(result.adopted, [])
+
+    def test_conflict_with_provable_order(self):
+        "With provable order, the later change supersedes the earlier one"
+        changes = [
+            self.Change("supplier-a", "source", "x", order=1),
+            self.Change("editor", "source", "y", order=2),
+        ]
+        permissions = {"supplier-a": ["source"], "editor": ["source"]}
+        result = self.merge_metadata({"source": "old"}, changes, permissions)
+
+        self.assertEqual(result.metadata["source"], "y")
+        self.assertEqual(result.conflicts, [])
+        self.assertEqual(
+            self.reasons(result), ["superseded by 'editor' under provable order"]
+        )
+
+    def test_parent_permission_does_not_bypass_frozen_child(self):
+        "Editing a permitted parent object still respects a frozen child key"
+        freezes = [self.Freeze(["meta.id"], version=5)]
+        changes = [
+            self.Change(
+                "editor",
+                "meta",
+                {"id": 43, "note": "updated"},
+                effective_version=6,
+            ),
+        ]
+        result = self.merge_metadata(self.base, changes, self.permissions, freezes)
+
+        self.assertEqual(result.metadata["meta"]["note"], "updated")
+        self.assertEqual(result.metadata["meta"]["id"], 42)
+        self.assertEqual(
+            self.reasons(result), ["'meta.id' is frozen since version 5"]
+        )
+
+    def test_merge_posts(self):
+        "merge_posts returns a new Post with merged metadata and base content"
+        post = frontmatter.Post("body text", **self.base)
+        changes = [self.Change("supplier-a", "source", "new-source")]
+        merged, result = self.merge_posts(post, changes, self.permissions)
+
+        self.assertEqual(merged.content, "body text")
+        self.assertEqual(merged["source"], "new-source")
+        self.assertEqual(merged["category"], "uncategorized")
+        self.assertEqual(result.metadata, merged.metadata)
+
+
 if __name__ == "__main__":
     unittest.main()
