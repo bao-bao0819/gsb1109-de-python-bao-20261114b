@@ -132,4 +132,73 @@ Well, hello there, world.
 
 ```
 
+## YAML anchors and shared revisions
+
+YAML anchors (`&`) and aliases (`*`) let several keys share one value, so
+editing a shared object would normally change every chapter at once. A `Post`
+keeps the anchor relationship in `post.anchor_map` and exposes `references`,
+`sources`, and `revise` so you can state your intent explicitly.
+
+`RevisionScope.LOCAL` (the default) detaches the named path from its anchor
+group and changes only that document. `RevisionScope.SHARED` edits the shared
+value once and reports every reference that changes with it:
+
+```python
+>>> chapter_text = '''---
+... author: &author
+...   name: Bob
+... chapters:
+...   one: *author
+...   two: *author
+... standalone:
+...   name: Bob
+... ---
+... body
+... '''
+>>> post = frontmatter.loads(chapter_text)
+>>> post.references('chapters.two')
+[('author',), ('chapters', 'one'), ('chapters', 'two')]
+
+```
+
+The `standalone` dictionary has identical contents but is not anchored, so it
+is never treated as shared:
+
+```python
+>>> post.references('standalone')
+[]
+
+```
+
+A local revision changes only chapter two, leaving the author, chapter one,
+and the unanchored dictionary untouched:
+
+```python
+>>> result = post.revise('chapters.two.name', 'Dana', frontmatter.RevisionScope.LOCAL)
+>>> result.changed
+[('chapters', 'two', 'name')]
+>>> post['author']['name'], post['chapters']['one']['name'], post['chapters']['two']['name']
+('Bob', 'Bob', 'Dana')
+
+```
+
+Asking for the shared scope instead propagates the edit through every alias,
+while the equal-but-unanchored value still stays the same:
+
+```python
+>>> post = frontmatter.loads(chapter_text)
+>>> result = post.revise('chapters.two.name', 'Dana', frontmatter.RevisionScope.SHARED)
+>>> result.changed
+[('author',), ('chapters', 'one'), ('chapters', 'two')]
+>>> post['standalone']['name']
+'Bob'
+
+```
+
+`RevisionResult.changed` only lists paths whose stored value actually changed,
+and a no-op revision reports nothing. Nested references that loop back into an
+anchor stay finite: `sources` marks the cycle point instead of recursing
+forever, and writing the post out and reloading it preserves the remaining
+shares.
+
 For more examples, see files in the `tests/` directory. Each sample file has a corresponding `.result.json` file showing the expected parsed output. See also the `examples/` directory, which covers more ways to customize input and output.

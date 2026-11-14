@@ -5,11 +5,24 @@ Python Frontmatter: Parse and manage posts with YAML frontmatter
 
 from __future__ import annotations
 
+import copy
 import io
 import pathlib
 from os import PathLike
-from typing import TYPE_CHECKING, Iterable, TextIO
+from typing import TYPE_CHECKING, Callable, Iterable, TextIO, cast
 
+from .anchors import (
+    AnchorMap,
+    RevisionResult,
+    RevisionScope,
+    Source,
+    assign,
+    normalize_path,
+    resolve,
+    shared_group,
+    trace_sources,
+    values_differ,
+)
 from .default_handlers import JSONHandler, TOMLHandler, YAMLHandler
 from .util import can_open, is_readable, is_writable, u
 
@@ -17,7 +30,18 @@ if TYPE_CHECKING:
     from .default_handlers import BaseHandler
 
 
-__all__ = ["parse", "load", "loads", "dump", "dumps"]
+__all__ = [
+    "parse",
+    "load",
+    "loads",
+    "dump",
+    "dumps",
+    "Post",
+    "AnchorMap",
+    "RevisionResult",
+    "RevisionScope",
+    "Source",
+]
 
 
 # global handlers
@@ -191,7 +215,25 @@ def loads(
     text = u(text, encoding)
     handler = handler or detect_format(text, handlers)
     metadata, content = parse(text, encoding, handler, **defaults)
-    return Post(content, handler, **metadata)
+    post = Post(content, handler, **metadata)
+    post.anchor_map = _build_anchor_map(handler, text)
+    return post
+
+
+def _build_anchor_map(
+    handler: BaseHandler | None, text: str
+) -> AnchorMap | None:
+    if handler is None:
+        return None
+    builder = getattr(handler, "anchor_map", None)
+    if not callable(builder):
+        return None
+    try:
+        fm, _ = handler.split(u(text).strip())
+    except ValueError:
+        return None
+    build = cast(Callable[[str], AnchorMap | None], builder)
+    return build(fm)
 
 
 def dump(
@@ -301,6 +343,10 @@ class Post(object):
     will turn it back into text.
 
     For convenience, metadata values are available as proxied item lookups.
+
+    YAML posts also carry an :class:`AnchorMap <frontmatter.AnchorMap>` describing
+    the anchors and aliases in the original front matter, which powers
+    :py:meth:`revise <frontmatter.Post.revise>`.
     """
 
     def __init__(
@@ -309,6 +355,7 @@ class Post(object):
         self.content = str(content)
         self.metadata = metadata
         self.handler = handler
+        self.anchor_map: AnchorMap | None = None
 
     def __getitem__(self, name: str) -> object:
         "Get metadata key"
@@ -349,3 +396,148 @@ class Post(object):
         d = self.metadata.copy()
         d["content"] = self.content
         return d
+
+    def references(self, path: str | Iterable[object]) -> list[tuple[object, ...]]:
+        """
+        Return every metadata path joined to ``path`` by a YAML anchor.
+
+        A standalone value that merely equals another dictionary is not
+        shared, so it is not reported. Posts without anchor bookkeeping fall
+        back to object-identity matching.
+        """
+        target = normalize_path(path)
+        if self.anchor_map is not None:
+            match = self.anchor_map.anchor_for_path(target)
+            if match is None:
+                return []
+            anchor, _definition = match
+            return [
+                tuple(member)
+                for member in self.anchor_map.reference_paths(anchor)
+            ]
+        group = shared_group(self.metadata, target)
+        if group is None:
+            return []
+        _shared_value, occurrences, _prefix = group
+        return occurrences
+
+    def sources(
+        self, path: str | Iterable[object]
+    ) -> list[Source]:
+        """
+        Return finite provenance for the aliases and cycles reachable from
+        a metadata path.
+        """
+        target = normalize_path(path)
+        value = resolve(self.metadata, target)
+        return trace_sources(value, target, self.anchor_map)
+
+    def revise(
+        self,
+        path: str | Iterable[object],
+        value: object,
+        scope: RevisionScope | str = RevisionScope.LOCAL,
+    ) -> RevisionResult:
+        """
+        Revise one metadata value with explicit intent for shared anchors.
+
+        ``RevisionScope.LOCAL`` (the default) changes only the named path,
+        detaching it from its anchor group first. ``RevisionScope.SHARED``
+        edits the shared value once and reports every reference that changes
+        along with it. The returned :class:`RevisionResult` lists only paths
+        whose stored value really changed, plus finite source notes for
+        aliases and nested cycles.
+        """
+        if isinstance(scope, str):
+            scope = RevisionScope(scope)
+        target = normalize_path(path)
+        old_value = resolve(self.metadata, target)
+        result = RevisionResult(
+            path=target,
+            value=value,
+            old_value=old_value,
+            scope=scope,
+        )
+        group = self._governing_group(target)
+        trace_root = group[1] if group is not None else target
+        result.sources = trace_sources(
+            resolve(self.metadata, trace_root), trace_root, self.anchor_map
+        )
+
+        if not values_differ(old_value, value):
+            return result
+
+        if scope is RevisionScope.LOCAL:
+            self._revise_local(target, value, group, result)
+        else:
+            self._revise_shared(target, value, group, result)
+        return result
+
+    def _governing_group(
+        self, target: tuple[object, ...]
+    ) -> tuple[list[tuple[object, ...]], tuple[object, ...]] | None:
+        if self.anchor_map is not None:
+            governed = self.anchor_map.governing_group(target)
+            if governed is None:
+                return None
+            _anchor, members, prefix = governed
+            if len(members) < 2:
+                return None
+            return [tuple(member) for member in members], prefix
+        group = shared_group(self.metadata, target)
+        if group is None:
+            return None
+        _shared_value, occurrences, prefix = group
+        return occurrences, prefix
+
+    def _revise_local(
+        self,
+        target: tuple[object, ...],
+        value: object,
+        group: tuple[list[tuple[object, ...]], tuple[object, ...]] | None,
+        result: RevisionResult,
+    ) -> None:
+        if group is None:
+            assign(self.metadata, target, value)
+            result.changed = [target]
+            return
+
+        _members, prefix = group
+        if target == prefix:
+            assign(self.metadata, prefix, value)
+        else:
+            assign(
+                self.metadata,
+                prefix,
+                copy.deepcopy(resolve(self.metadata, prefix)),
+            )
+            assign(self.metadata, target, value)
+        if self.anchor_map is not None:
+            self.anchor_map.detach(prefix)
+        result.detached = True
+        result.changed = [target]
+
+    def _revise_shared(
+        self,
+        target: tuple[object, ...],
+        value: object,
+        group: tuple[list[tuple[object, ...]], tuple[object, ...]] | None,
+        result: RevisionResult,
+    ) -> None:
+        if group is None:
+            assign(self.metadata, target, value)
+            result.changed = [target]
+            return
+
+        members, prefix = group
+        snapshot = copy.deepcopy(resolve(self.metadata, prefix))
+        suffix = target[len(prefix):]
+        if suffix:
+            assign(resolve(self.metadata, prefix), suffix, value)
+        else:
+            for member in members:
+                assign(self.metadata, member, value)
+        for member in members:
+            current = resolve(self.metadata, member)
+            if values_differ(snapshot, current):
+                result.changed.append(member)

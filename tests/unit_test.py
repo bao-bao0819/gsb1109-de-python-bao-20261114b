@@ -386,5 +386,309 @@ And this shouldn't break.
         }
 
 
+CHAPTERS_TEXT = """\
+---
+author: &author
+  name: Bob
+  mail: bob@example.com
+chapters:
+  one: *author
+  two: *author
+  three: *author
+standalone:
+  name: Bob
+  mail: bob@example.com
+---
+Chapter body.
+"""
+
+CYCLE_TEXT = """\
+---
+node_a: &a
+  name: Bob
+  friend: *a
+node_b: &b
+  name: Carol
+  mate: *a
+---
+Cyclic body.
+"""
+
+
+class AnchorRevisionTest(unittest.TestCase):
+    """
+    Anchor-aware revisions: local edits detach, shared edits propagate,
+    equal-but-unanchored dicts stay independent, and cycles stay finite.
+    """
+
+    maxDiff = None
+
+    def test_anchor_map_records_definitions_and_aliases(self):
+        post = frontmatter.loads(CHAPTERS_TEXT)
+        self.assertIsNotNone(post.anchor_map)
+        assert post.anchor_map is not None
+        self.assertEqual(post.anchor_map.definitions, {"author": ("author",)})
+        self.assertEqual(
+            post.anchor_map.aliases,
+            {
+                ("chapters", "one"): "author",
+                ("chapters", "two"): "author",
+                ("chapters", "three"): "author",
+            },
+        )
+
+    def test_references_follow_anchor_but_not_equal_dicts(self):
+        post = frontmatter.loads(CHAPTERS_TEXT)
+        self.assertEqual(
+            post.references("chapters.three"),
+            [
+                ("author",),
+                ("chapters", "one"),
+                ("chapters", "two"),
+                ("chapters", "three"),
+            ],
+        )
+        # identical contents, but no anchor: not part of the shared group
+        self.assertEqual(post.references("standalone"), [])
+        self.assertIsNot(
+            post["standalone"], post["author"],
+        )
+        self.assertEqual(post["standalone"], post["author"])
+
+    def test_local_revision_changes_only_named_chapter(self):
+        post = frontmatter.loads(CHAPTERS_TEXT)
+        result = post.revise(
+            "chapters.three.name", "Dana", frontmatter.RevisionScope.LOCAL
+        )
+
+        self.assertEqual(result.changed, [("chapters", "three", "name")])
+        self.assertTrue(result.detached)
+        self.assertEqual(post["chapters"]["three"]["name"], "Dana")
+        self.assertEqual(post["author"]["name"], "Bob")
+        self.assertEqual(post["chapters"]["one"]["name"], "Bob")
+        self.assertEqual(post["chapters"]["two"]["name"], "Bob")
+        # the equal-but-unanchored dict is never touched
+        self.assertEqual(post["standalone"]["name"], "Bob")
+
+    def test_local_revision_roundtrip_keeps_remaining_shares(self):
+        post = frontmatter.loads(CHAPTERS_TEXT)
+        post.revise("chapters.three.name", "Dana", "local")
+
+        reloaded = frontmatter.loads(frontmatter.dumps(post))
+        self.assertEqual(reloaded["chapters"]["three"]["name"], "Dana")
+        self.assertEqual(reloaded["chapters"]["one"]["name"], "Bob")
+        self.assertEqual(reloaded["standalone"]["name"], "Bob")
+        # chapter three left the group; one and two still share the anchor
+        self.assertEqual(
+            reloaded.references("chapters.one"),
+            [("author",), ("chapters", "one"), ("chapters", "two")],
+        )
+        self.assertEqual(reloaded.references("chapters.three"), [])
+        self.assertIs(
+            reloaded["chapters"]["one"], reloaded["author"],
+        )
+        self.assertIsNot(
+            reloaded["chapters"]["three"], reloaded["author"],
+        )
+
+    def test_shared_revision_changes_every_reference_only(self):
+        post = frontmatter.loads(CHAPTERS_TEXT)
+        result = post.revise(
+            "chapters.three.name", "Dana", frontmatter.RevisionScope.SHARED
+        )
+
+        self.assertEqual(
+            result.changed,
+            [
+                ("author",),
+                ("chapters", "one"),
+                ("chapters", "two"),
+                ("chapters", "three"),
+            ],
+        )
+        for location in ("author", "one", "two", "three"):
+            if location == "author":
+                self.assertEqual(post["author"]["name"], "Dana")
+            else:
+                self.assertEqual(
+                    post["chapters"][location]["name"], "Dana"
+                )
+        # not anchored, so it must not change
+        self.assertEqual(post["standalone"]["name"], "Bob")
+
+        reloaded = frontmatter.loads(frontmatter.dumps(post))
+        self.assertEqual(reloaded["chapters"]["three"]["name"], "Dana")
+        self.assertEqual(reloaded["standalone"]["name"], "Bob")
+        # YAML re-emits mapping keys sorted, so compare without ordering
+        self.assertCountEqual(
+            reloaded.references("chapters.three"),
+            [
+                ("author",),
+                ("chapters", "one"),
+                ("chapters", "two"),
+                ("chapters", "three"),
+            ],
+        )
+
+    def test_revising_unanchored_equal_dict_is_local_only(self):
+        post = frontmatter.loads(CHAPTERS_TEXT)
+        result = post.revise(
+            "standalone.name", "Erin", frontmatter.RevisionScope.SHARED
+        )
+        self.assertEqual(result.changed, [("standalone", "name")])
+        self.assertEqual(post["standalone"]["name"], "Erin")
+        self.assertEqual(post["author"]["name"], "Bob")
+
+    def test_noop_revision_reports_no_changes(self):
+        post = frontmatter.loads(CHAPTERS_TEXT)
+        result = post.revise(
+            "chapters.three.name", "Bob", frontmatter.RevisionScope.SHARED
+        )
+        self.assertEqual(result.changed, [])
+        self.assertEqual(post["author"]["name"], "Bob")
+
+    def test_local_revision_replaces_whole_alias_node(self):
+        post = frontmatter.loads(CHAPTERS_TEXT)
+        new_author = {"name": "Dana", "mail": "dana@example.com"}
+        result = post.revise("chapters.three", new_author, "local")
+        self.assertEqual(result.changed, [("chapters", "three")])
+        self.assertEqual(post["chapters"]["three"], new_author)
+        self.assertEqual(post["chapters"]["one"]["name"], "Bob")
+        self.assertEqual(post.references("chapters.three"), [])
+
+    def test_local_revision_through_definition_moves_anchor(self):
+        post = frontmatter.loads(CHAPTERS_TEXT)
+        result = post.revise("author.name", "Dana", "local")
+        self.assertEqual(result.changed, [("author", "name")])
+        self.assertTrue(result.detached)
+        self.assertEqual(post["author"]["name"], "Dana")
+        # the three aliases remain a shared group without the definition
+        self.assertEqual(
+            post.references("chapters.one"),
+            [
+                ("chapters", "one"),
+                ("chapters", "two"),
+                ("chapters", "three"),
+            ],
+        )
+        self.assertEqual(post.references("author"), [])
+
+        reloaded = frontmatter.loads(frontmatter.dumps(post))
+        self.assertEqual(reloaded["author"]["name"], "Dana")
+        self.assertEqual(reloaded["chapters"]["one"]["name"], "Bob")
+        self.assertIs(
+            reloaded["chapters"]["one"], reloaded["chapters"]["two"],
+        )
+        self.assertIsNot(
+            reloaded["chapters"]["one"], reloaded["author"],
+        )
+
+    def test_result_describe_lists_real_changes_and_sources(self):
+        post = frontmatter.loads(CHAPTERS_TEXT)
+        result = post.revise("chapters.three.name", "Dana", "local")
+        text = result.describe()
+        self.assertIn("chapters.three.name", text)
+        self.assertIn("alias *author", text)
+        self.assertIn("defined at author", text)
+
+    def test_interned_scalars_are_not_treated_as_cycles(self):
+        # CPython interns small ints and some strings; sharing by identity
+        # must only apply to containers, otherwise these look like a cycle.
+        text = (
+            "---\n"
+            "profile: &p\n  count: 5\n  retries: 5\n"
+            "other: *p\n"
+            "---\nbody\n"
+        )
+        post = frontmatter.loads(text)
+        sources = post.sources("profile")
+        self.assertFalse(
+            any(source.cyclic for source in sources),
+            [source.describe() for source in sources],
+        )
+        # the genuine container-level alias is still reported
+        self.assertEqual(
+            post.references("other"),
+            [("profile",), ("other",)],
+        )
+
+    def test_cycle_sources_are_finite(self):
+        post = frontmatter.loads(CYCLE_TEXT)
+        sources = post.sources("node_a")
+        descriptions = [source.describe() for source in sources]
+
+        # traversal terminates and names the loop back explicitly
+        self.assertTrue(
+            any(source.cyclic for source in sources),
+            f"expected a cyclic source, got {descriptions}",
+        )
+        self.assertTrue(
+            any("cyclic reference, chain stopped" in text for text in descriptions)
+        )
+        cyclic = next(source for source in sources if source.cyclic)
+        self.assertEqual(cyclic.location, ("node_a", "friend"))
+        self.assertEqual(cyclic.anchor, "a")
+
+    def test_revision_inside_cycle_does_not_recurse_forever(self):
+        post = frontmatter.loads(CYCLE_TEXT)
+        result = post.revise("node_b.mate.name", "Dana", "local")
+        self.assertEqual(result.changed, [("node_b", "mate", "name")])
+        self.assertTrue(
+            any(source.cyclic for source in result.sources)
+        )
+
+        reloaded = frontmatter.loads(frontmatter.dumps(post))
+        # the original self-loop survives, and node_b now owns a detached copy
+        self.assertIs(
+            reloaded["node_a"]["friend"], reloaded["node_a"],
+        )
+        self.assertIsNot(
+            reloaded["node_b"]["mate"], reloaded["node_a"],
+        )
+        self.assertEqual(reloaded["node_a"]["name"], "Bob")
+        self.assertEqual(reloaded["node_b"]["mate"]["name"], "Dana")
+        self.assertIs(
+            reloaded["node_b"]["mate"]["friend"],
+            reloaded["node_b"]["mate"],
+        )
+
+    def test_sequence_alias_path(self):
+        text = (
+            "---\n"
+            "profile: &p\n  name: Bob\n"
+            "chapters:\n  - *p\n  - *p\n"
+            "---\nbody\n"
+        )
+        post = frontmatter.loads(text)
+        self.assertEqual(
+            post.references("chapters.0"),
+            [("profile",), ("chapters", 0), ("chapters", 1)],
+        )
+        result = post.revise("chapters.1.name", "Dana", "shared")
+        self.assertEqual(
+            result.changed,
+            [("profile",), ("chapters", 0), ("chapters", 1)],
+        )
+        self.assertEqual(post["chapters"][0]["name"], "Dana")
+
+    def test_json_post_has_no_anchor_map_but_keeps_identity_fallback(self):
+        text = (
+            "{\n"
+            '  "author": {"name": "Bob"},\n'
+            '  "body": "x"\n'
+            "}\n"
+            "content\n"
+        )
+        post = frontmatter.loads(text)
+        self.assertIsNone(post.anchor_map)
+        # JSON cannot express anchors, so identity sharing is the fallback
+        shared = post["author"]
+        post.metadata["mirror"] = shared
+        self.assertEqual(
+            post.references("mirror"),
+            [("author",), ("mirror",)],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

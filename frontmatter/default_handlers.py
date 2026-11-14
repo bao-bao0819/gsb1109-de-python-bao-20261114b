@@ -143,6 +143,7 @@ except ImportError:
     toml = None
 
 from .util import u
+from .anchors import AnchorMap
 
 if TYPE_CHECKING:
     from frontmatter import Post
@@ -220,6 +221,14 @@ class BaseHandler:
         """
         raise NotImplementedError
 
+    def anchor_map(self, fm: str) -> AnchorMap | None:
+        """
+        Extract anchor definitions and alias locations from front matter.
+
+        Only YAML carries anchors, so the base implementation returns None.
+        """
+        return None
+
     def export(self, metadata: dict[str, object], **kwargs: object) -> str:
         """
         Turn metadata back into text
@@ -258,6 +267,56 @@ class YAMLHandler(BaseHandler):
         """
         kwargs.setdefault("Loader", SafeLoader)
         return yaml.load(fm, **kwargs)  # type: ignore[arg-type]
+
+    def anchor_map(self, fm: str) -> AnchorMap | None:
+        """
+        Build an :class:`AnchorMap <frontmatter.anchors.AnchorMap>` from YAML
+        anchor and alias events, keeping the original anchor names and paths.
+        """
+        events = yaml.parse(fm, Loader=SafeLoader)
+        anchor_map = AnchorMap()
+        iterator = iter(events)
+
+        def record(event: yaml.NodeEvent, path: tuple[Any, ...]) -> None:
+            if isinstance(event, yaml.AliasEvent):
+                anchor_map.aliases[path] = str(event.anchor)
+                return
+            if event.anchor is not None:
+                anchor_map.definitions[str(event.anchor)] = path
+            if isinstance(event, yaml.MappingStartEvent):
+                parse_mapping(path)
+            elif isinstance(event, yaml.SequenceStartEvent):
+                parse_sequence(path)
+
+        def parse_mapping(path: tuple[Any, ...]) -> None:
+            while True:
+                event = next(iterator)
+                if isinstance(event, yaml.MappingEndEvent):
+                    return
+                value_event = next(iterator)
+                record(value_event, path + (str(event.value),))
+
+        def parse_sequence(path: tuple[Any, ...]) -> None:
+            index = 0
+            while True:
+                event = next(iterator)
+                if isinstance(event, yaml.SequenceEndEvent):
+                    return
+                record(event, path + (index,))
+                index += 1
+
+        document_started = False
+        for event in iterator:
+            if isinstance(event, yaml.DocumentStartEvent):
+                document_started = True
+                break
+        if not document_started:
+            return anchor_map
+        root = next(iterator)
+        if isinstance(root, yaml.StreamEndEvent):
+            return anchor_map
+        record(root, ())
+        return anchor_map
 
     def export(self, metadata: dict[str, object], **kwargs: object) -> str:
         """

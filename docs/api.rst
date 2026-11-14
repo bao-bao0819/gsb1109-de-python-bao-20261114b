@@ -33,6 +33,22 @@ Post objects
     :special-members: __getitem__, __setitem__, __delitem__
 
 
+YAML anchors and revisions
+--------------------------
+
+.. autoclass:: frontmatter.AnchorMap
+    :members:
+
+.. autoclass:: frontmatter.RevisionScope
+    :members:
+
+.. autoclass:: frontmatter.RevisionResult
+    :members:
+
+.. autoclass:: frontmatter.Source
+    :members:
+
+
 Handlers
 --------
 
