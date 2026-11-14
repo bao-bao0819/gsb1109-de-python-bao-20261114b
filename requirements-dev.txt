@@ -1,0 +1,6 @@
+# requirements for development and release process
+twine               # PyPi interaction, long description check in setup.py (twine check dist/intelhex-*.whl)
+rst2html            # documentation generation
+sphinx              # documentation generation
+docutils            # sphinx and rest2html dependency
+pdoc                # API documentation
