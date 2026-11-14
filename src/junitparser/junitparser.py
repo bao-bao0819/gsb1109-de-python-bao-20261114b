@@ -668,6 +668,50 @@ class TestSuite(Element):
             return
         yield from props
 
+    @property
+    def system_out(self):
+        """Suite-level stdout, shared by all test cases in the suite."""
+        elem = self.child(SystemOut)
+        if elem is not None:
+            return elem.text
+        return None
+
+    @system_out.setter
+    def system_out(self, value: str):
+        out = self.child(SystemOut)
+        if out is not None:
+            out.text = value
+        else:
+            out = SystemOut(value)
+            self.append(out)
+
+    @property
+    def system_err(self):
+        """Suite-level stderr, shared by all test cases in the suite."""
+        elem = self.child(SystemErr)
+        if elem is not None:
+            return elem.text
+        return None
+
+    @system_err.setter
+    def system_err(self, value: str):
+        err = self.child(SystemErr)
+        if err is not None:
+            err.text = value
+        else:
+            err = SystemErr(value)
+            self.append(err)
+
+    def split_system_out(self, cases, **kwargs):
+        """Split this suite's shared ``system-out`` into per-case logs.
+
+        Arguments are those of :func:`junitparser.logsplit.split_system_out`
+        except *source*, which is this suite's ``system-out`` text.
+        """
+        from .logsplit import split_system_out
+
+        return split_system_out(self, cases, **kwargs)
+
     def remove_property(self, property_: Property):
         """Remove property *property_* from the testsuite."""
         props = self.child(Properties)

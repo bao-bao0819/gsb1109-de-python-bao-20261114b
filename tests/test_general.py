@@ -511,6 +511,29 @@ class Test_TestSuite:
         assert suite.name == "suitename"
         assert suite.tests == 1
 
+    def test_system_out_and_err(self):
+        suite = TestSuite("suitename")
+        assert suite.system_out is None
+        assert suite.system_err is None
+
+        suite.system_out = "suite out"
+        suite.system_err = "suite err"
+        assert suite.system_out == "suite out"
+        assert suite.system_err == "suite err"
+
+        suite.system_out = "updated out"
+        suite.system_err = "updated err"
+        assert suite.system_out == "updated out"
+        assert suite.system_err == "updated err"
+
+        parsed = TestSuite.fromstring(
+            '<testsuite name="s"><system-out>out</system-out>'
+            "<system-err>err</system-err></testsuite>"
+        )
+        assert parsed.system_out == "out"
+        assert parsed.system_err == "err"
+        assert parsed.tostring().count(b"<system-out>") == 1
+
     def test_props_fromstring(self):
         text = """<testsuite name="suitename">
         <properties><property name="name1" value="value1"/></properties>

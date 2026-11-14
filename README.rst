@@ -130,6 +130,46 @@ You have two or more XML files, and you want to merge them into one.
 Note that it won't check for duplicate entries. You need to deal with them on
 your own.
 
+Split a shared system-out into per-case logs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Stress-test runners may write the output of several parallel test cases into
+one suite-level ``<system-out>``. A fragment number that increases for each
+case, plus the occasional execution ID, is often all the stream gives you.
+
+Declare each case's fragment order. A line is archived into a case only when
+every feasible interleaving agrees on it; other lines are reported with the
+candidate executions that remain possible.
+
+.. code-block:: python
+
+    from junitparser import CaseSpec, JUnitXml, split_system_out
+
+    xml = JUnitXml.fromfile('/path/to/junit.xml')
+    suite = next(iter(xml))
+    result = split_system_out(
+        suite,  # or the raw system-out string
+        [
+            CaseSpec('test_login', (1, 3, 5)),
+            CaseSpec('test_upload', (2, 4), execution_id='upload-worker'),
+        ],
+        start=r'--- run ---',
+        end=r'--- done ---',
+        fragment=r'--- fragment (?P<fragment>\d+) ---',
+        execution_id=r'execution id: (?P<execution_id>\S+)',
+    )
+    result.feasible          # does any interleaving satisfy the order?
+    result.archived_text()   # {case name: text archived with certainty}
+    result.candidates        # lines that still need a decision
+    for line in result.candidates:
+        print(line.number, line.text, line.candidate_executions)
+
+Source line numbers are one-based and refer to the original stream. Duplicate
+lines are separate entries: they are never merged, so two identical fragments
+keep their own numbers. ``split_system_out`` accepts regular expressions for
+every marker. If you prefer a reusable configuration, build a
+``SystemOutSplitter`` and call its ``split`` method.
+
 Schema Support
 ~~~~~~~~~~~~~~~
 

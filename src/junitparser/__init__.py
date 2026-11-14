@@ -17,11 +17,25 @@ from .junitparser import (
     TestCase,
     TestSuite,
 )
+from .logsplit import (
+    CaseLog,
+    CaseSpec,
+    LineAssignment,
+    LogLine,
+    LogSplitError,
+    LogSplitter,
+    SplitResult,
+    SystemOutSplitter,
+    split_log,
+    split_system_out,
+)
 
 version = _dist_version("junitparser")
 
 __all__ = [
     "Attr",
+    "CaseLog",
+    "CaseSpec",
     "Element",
     "Error",
     "Failure",
@@ -29,12 +43,20 @@ __all__ = [
     "IntAttr",
     "JUnitXml",
     "JUnitXmlError",
+    "LineAssignment",
+    "LogLine",
+    "LogSplitError",
+    "LogSplitter",
     "Properties",
     "Property",
     "Skipped",
+    "SplitResult",
     "SystemOut",
     "SystemErr",
+    "SystemOutSplitter",
     "TestCase",
     "TestSuite",
+    "split_log",
+    "split_system_out",
     "version",
 ]

@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+### Added
+- `logsplit` module to split a shared suite-level `system-out` into per-case
+  logs. Fragment order and explicit execution IDs constrain each line; a line
+  is archived only when every feasible interleaving assigns it to one case,
+  otherwise its candidate executions are reported. Original line numbers are
+  preserved and duplicate lines are never merged.
+- `TestSuite.system_out` and `TestSuite.system_err` accessors.
+- `TestSuite.split_system_out()` convenience method.
+
 ## [5.0.3] - 2026-08-31
 ### Fixed
 - Issue 177: Fix 177 different behavior of + and +=.
