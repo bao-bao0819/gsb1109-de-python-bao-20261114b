@@ -11,13 +11,33 @@ from os import PathLike
 from typing import TYPE_CHECKING, Iterable, TextIO
 
 from .default_handlers import JSONHandler, TOMLHandler, YAMLHandler
+from .interpretation import (
+    AmbiguousFormatError,
+    Interpretation,
+    Interpretations,
+    NoInterpretationError,
+    interpret,
+    probe,
+)
 from .util import can_open, is_readable, is_writable, u
 
 if TYPE_CHECKING:
     from .default_handlers import BaseHandler
 
 
-__all__ = ["parse", "load", "loads", "dump", "dumps"]
+__all__ = [
+    "parse",
+    "load",
+    "loads",
+    "dump",
+    "dumps",
+    "probe",
+    "interpret",
+    "Interpretation",
+    "Interpretations",
+    "AmbiguousFormatError",
+    "NoInterpretationError",
+]
 
 
 # global handlers

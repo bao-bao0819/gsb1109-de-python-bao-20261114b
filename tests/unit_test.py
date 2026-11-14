@@ -2,13 +2,26 @@
 # -*- coding: utf-8 -*-
 
 import os
+import pathlib
+import re
 import shutil
 import tempfile
 import textwrap
 import unittest
 
 import frontmatter
-from frontmatter.default_handlers import YAMLHandler, JSONHandler, TOMLHandler
+from frontmatter.default_handlers import (
+    YAMLHandler,
+    JSONHandler,
+    TOMLHandler,
+    BaseHandler,
+)
+from frontmatter.interpretation import (
+    AmbiguousFormatError,
+    Interpretation,
+    Interpretations,
+    NoInterpretationError,
+)
 
 try:
     import pyaml
@@ -384,6 +397,271 @@ And this shouldn't break.
 """,
             "metadata": {"test": "tester", "author": "bob", "something": "else"},
         }
+
+
+class InterpretationTest(unittest.TestCase):
+    """
+    Tests for frontmatter.probe / frontmatter.interpret
+    """
+
+    maxDiff = None
+
+    def test_probe_reports_handler_interval_and_body(self):
+        "Every candidate lists handler, consumed bytes, and exact body start"
+        source = b"---\ntitle: x\n---\n\nBody\n"
+        report = frontmatter.probe(source)
+
+        self.assertIsInstance(report, Interpretations)
+        self.assertEqual(len(report), 1)
+
+        candidate = report[0]
+        self.assertIsInstance(candidate, Interpretation)
+        self.assertIsInstance(candidate.handler, YAMLHandler)
+        self.assertEqual(candidate.metadata, {"title": "x"})
+        self.assertEqual(candidate.consumed, (0, 17))
+        self.assertEqual(candidate.body_start, 17)
+        self.assertEqual(source[candidate.body_start :], candidate.content_bytes)
+        self.assertEqual(candidate.content, "\nBody\n")
+
+    def test_probe_preserves_first_blank_line(self):
+        "The newline that starts the body is never eaten"
+        source = b"---\ntitle: x\n---\n\n\nBody\n"
+        candidate = frontmatter.interpret(source)
+
+        self.assertEqual(candidate.content, "\n\nBody\n")
+        self.assertEqual(candidate.content_bytes, b"\n\nBody\n")
+
+    def test_probe_preserves_crlf_body(self):
+        "CRLF bodies stay byte-for-byte identical to the original"
+        source = b"---\r\ntitle: x\r\n---\r\n\r\nBody\r\n"
+        candidate = frontmatter.interpret(source)
+
+        self.assertEqual(candidate.content, "\r\nBody\r\n")
+        self.assertEqual(candidate.content_bytes, b"\r\nBody\r\n")
+        self.assertEqual(source[candidate.body_start :], candidate.content_bytes)
+
+    def test_probe_uses_byte_offsets_with_unicode(self):
+        "Offsets count UTF-8 bytes, not characters"
+        source = "---\ntitle: 中文\n---\n\nBody\n".encode("utf-8")
+        candidate = frontmatter.interpret(source)
+
+        self.assertEqual(candidate.metadata, {"title": "中文"})
+        self.assertEqual(
+            source[: candidate.body_start].decode(), "---\ntitle: 中文\n---\n"
+        )
+        self.assertEqual(source[candidate.body_start :], b"\nBody\n")
+
+    def test_probe_does_not_strip_content(self):
+        "Unlike parse, probe leaves leading and trailing whitespace alone"
+        source = b"---\ntitle: x\n---\n\n  indented body  \n\n"
+        candidate = frontmatter.interpret(source)
+
+        self.assertEqual(candidate.content, "\n  indented body  \n\n")
+
+    def test_interpret_key_order_is_equivalent(self):
+        "Two handlers agreeing on body and metadata are not ambiguous"
+        first = _fixed_handler(YAMLHandler, {"a": 1, "b": 2}, 20)
+        second = _fixed_handler(JSONHandler, {"b": 2, "a": 1}, 20)
+        text = "x" * 20 + "body"
+
+        report = frontmatter.probe(text, handlers=[first, second])
+
+        self.assertEqual(len(report), 2)
+        self.assertFalse(report.requires_selection)
+        self.assertEqual(report.choose().body_start, 20)
+
+    def test_interpret_nested_key_order_is_equivalent(self):
+        "Key order inside nested metadata is also irrelevant"
+        first = _fixed_handler(YAMLHandler, {"outer": {"a": 1, "b": 2}}, 20)
+        second = _fixed_handler(JSONHandler, {"outer": {"b": 2, "a": 1}}, 20)
+        text = "x" * 20 + "body"
+
+        report = frontmatter.probe(text, handlers=[first, second])
+
+        self.assertFalse(report.requires_selection)
+
+    def test_interpret_different_body_lengths_require_choice(self):
+        "Different cut points must surface as an ambiguity"
+        first = _fixed_handler(YAMLHandler, {"a": 1}, 10)
+        second = _fixed_handler(JSONHandler, {"a": 1}, 20)
+        text = "x" * 20 + "body"
+
+        report = frontmatter.probe(text, handlers=[first, second])
+
+        self.assertTrue(report.requires_selection)
+        self.assertRaises(
+            AmbiguousFormatError, frontmatter.interpret, text, handlers=[first, second]
+        )
+
+    def test_interpret_error_lists_candidates(self):
+        "The ambiguity error exposes every candidate for a format prompt"
+        first = _fixed_handler(YAMLHandler, {"a": 1}, 10)
+        second = _fixed_handler(JSONHandler, {"a": 1}, 20)
+        text = "x" * 20 + "body"
+
+        with self.assertRaises(AmbiguousFormatError) as caught:
+            frontmatter.interpret(text, handlers=[first, second])
+
+        self.assertEqual(len(caught.exception.interpretations), 2)
+        self.assertEqual(
+            [candidate.body_start for candidate in caught.exception.interpretations],
+            [10, 20],
+        )
+
+    def test_interpret_can_choose_differing_format(self):
+        "Explicit selection returns the body cut belonging to that handler"
+        first = _fixed_handler(YAMLHandler, {"a": 1}, 10)
+        second = _fixed_handler(JSONHandler, {"a": 2}, 20)
+        text = "x" * 20 + "body"
+
+        chosen = frontmatter.interpret(
+            text, handler=JSONHandler, handlers=[first, second]
+        )
+
+        self.assertIsInstance(chosen.handler, JSONHandler)
+        self.assertEqual(chosen.metadata, {"a": 2})
+        self.assertEqual(chosen.body_start, 20)
+        self.assertEqual(chosen.content, "body")
+        self.assertEqual(chosen.to_post().content, "body")
+
+    def test_interpret_metadata_disagreement_requires_choice(self):
+        "Same cut point but different metadata still needs a decision"
+        first = _fixed_handler(YAMLHandler, {"a": 1}, 20)
+        second = _fixed_handler(JSONHandler, {"a": 2}, 20)
+        text = "x" * 20 + "body"
+
+        report = frontmatter.probe(text, handlers=[first, second])
+
+        self.assertTrue(report.requires_selection)
+
+    def test_interpret_chooses_equivalent_format_automatically(self):
+        "Equivalent candidates return the first one without a prompt"
+        first = _fixed_handler(YAMLHandler, {"a": 1}, 20)
+        second = _fixed_handler(JSONHandler, {"a": 1}, 20)
+        text = "x" * 20 + "body"
+
+        chosen = frontmatter.interpret(text, handlers=[first, second])
+
+        self.assertIsInstance(chosen.handler, YAMLHandler)
+
+    def test_probe_skips_handlers_that_cannot_parse(self):
+        "A handler whose load fails is not a candidate"
+        text = "x" * 20 + "body"
+        broken = _fixed_handler(YAMLHandler, {"a": 1}, 20, fail=True)
+
+        self.assertEqual(frontmatter.probe(text, handlers=[broken]), [])
+
+    def test_probe_requires_literal_body_suffix(self):
+        "A handler that invents content is not an explanation"
+        text = "x" * 20 + "body"
+        invented = _fixed_handler(YAMLHandler, {}, 20, content="something else")
+
+        self.assertEqual(frontmatter.probe(text, handlers=[invented]), [])
+
+    def test_interpret_explicit_handler_without_detect(self):
+        "An explicitly supplied handler bypasses detect, like parse does"
+        text = "..." + "body"
+        handler = _configured_handler(
+            BaseHandler, {"a": 1}, 3, detect=lambda text: False
+        )
+
+        chosen = frontmatter.interpret(text, handler=handler, handlers=[])
+
+        self.assertEqual(chosen.metadata, {"a": 1})
+        self.assertEqual(chosen.content, "body")
+
+    def test_interpret_no_candidates(self):
+        "No explanation raises a specific error"
+        self.assertRaises(
+            NoInterpretationError, frontmatter.interpret, "plain text", handlers=[]
+        )
+
+    def test_probe_json_body_is_not_a_second_document(self):
+        "A JSON metadata block followed by JSON-looking body stays one post"
+        text = '{\n    "title": "x"\n}\n\n{\n    "paragraph": true\n}\n\nMore.\n'
+
+        candidate = frontmatter.interpret(text)
+
+        self.assertIsInstance(candidate.handler, JSONHandler)
+        self.assertEqual(candidate.metadata, {"title": "x"})
+        self.assertTrue(candidate.content.startswith('\n{\n    "paragraph"'))
+
+    def test_probe_all_fixtures_preserve_bytes(self):
+        "Every candidate's content is exactly the original suffix"
+        for filename in pathlib.Path("tests").glob("**/*.*"):
+            if filename.suffix not in (".md", ".txt"):
+                continue
+            source = filename.read_bytes()
+            for candidate in frontmatter.probe(source):
+                with self.subTest(filename=str(filename)):
+                    self.assertEqual(
+                        source[candidate.body_start :], candidate.content_bytes
+                    )
+                    self.assertEqual(
+                        candidate.content_bytes.decode("utf-8"), candidate.content
+                    )
+                    self.assertEqual(
+                        source[: candidate.body_start], candidate.consumed_bytes
+                    )
+
+    def test_probe_custom_handler(self):
+        "Custom handlers participate without special casing"
+        text = "@@@\ntitle: x\n@@@\n\nBody\n"
+        handler = YAMLHandler(
+            fm_boundary=re.compile(r"^@@@\s*$", re.MULTILINE),
+            start_delimiter="@@@",
+            end_delimiter="@@@",
+        )
+
+        candidate = frontmatter.interpret(text, handler=handler, handlers=[])
+
+        self.assertEqual(candidate.metadata, {"title": "x"})
+        self.assertEqual(candidate.content, "\nBody\n")
+
+
+def _fixed_text(text, cut):
+    return text[:cut], text[cut:]
+
+
+def _configured_handler(base, metadata, cut, **kwargs):
+    "A ``base`` subclass with a fixed split, without inheriting its split code."
+    fixed_split = kwargs.get("split", _fixed_text)
+    fixed_detect = kwargs.get("detect", lambda text: True)
+    fixed_load = kwargs.get("load", lambda fm: metadata)
+
+    class Fixed(base):
+        FM_BOUNDARY = re.compile(r"^---$", re.MULTILINE)
+
+        def detect(self, text):
+            return fixed_detect(text)
+
+        def split(self, text):
+            return fixed_split(text, cut)
+
+        def load(self, fm):
+            return fixed_load(fm)
+
+    return Fixed()
+
+
+def _fixed_handler(base, metadata, cut, **kwargs):
+    if "content" in kwargs:
+        invented = kwargs.pop("content")
+
+        def content_split(text, cut, invented=invented):
+            return text[:cut], invented
+
+        kwargs["split"] = content_split
+    if kwargs.pop("fail", False):
+
+        def failing_load(fm):
+            raise ValueError("cannot load")
+
+        kwargs["load"] = failing_load
+    if "detect" in kwargs:
+        detected = kwargs["detect"]
+        kwargs["detect"] = lambda text, detected=detected: detected
+    return _configured_handler(base, metadata, cut, **kwargs)
 
 
 if __name__ == "__main__":

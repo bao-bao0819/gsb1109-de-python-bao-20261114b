@@ -16,6 +16,18 @@ Reading
 
 .. autofunction:: frontmatter.loads
 
+.. autofunction:: frontmatter.probe
+
+.. autofunction:: frontmatter.interpret
+
+.. autoclass:: frontmatter.Interpretation
+
+.. autoclass:: frontmatter.Interpretations
+
+.. autoexception:: frontmatter.AmbiguousFormatError
+
+.. autoexception:: frontmatter.NoInterpretationError
+
 
 Writing
 -------

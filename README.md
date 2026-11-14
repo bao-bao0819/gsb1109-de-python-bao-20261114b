@@ -133,3 +133,32 @@ Well, hello there, world.
 ```
 
 For more examples, see files in the `tests/` directory. Each sample file has a corresponding `.result.json` file showing the expected parsed output. See also the `examples/` directory, which covers more ways to customize input and output.
+
+## Checking every possible reading
+
+`load` and `parse` stop at the first handler that matches. When a document's body begins with something that also looks like metadata (a JSON paragraph, say), several handlers may be able to explain its beginning. `frontmatter.probe` lists all of them:
+
+```python
+>>> with open('tests/json/hello-json.md', 'rb') as f:
+...     report = frontmatter.probe(f.read())
+>>> [(type(c.handler).__name__, c.consumed, c.body_start) for c in report]
+[('JSONHandler', (0, 71), 71)]
+>>> report[0].content.startswith('\nTitle')
+True
+
+```
+
+`consumed` is the byte interval `(start, end)` the handler explains as metadata, and `body_start` is the byte offset where that handler says the body begins. `content` and `content_bytes` are the exact original slice after `body_start` — no whitespace is stripped, so the first blank line stays in the body.
+
+`frontmatter.interpret` returns a single reading, or raises `AmbiguousFormatError` when candidates cut the body at different offsets or disagree about metadata. Candidates that differ only in metadata key order are treated as equivalent. To resolve an ambiguity, pass `handler=` (or `index=`) explicitly, or ask the user which format to use from the error's `.interpretations` list:
+
+```python
+>>> from frontmatter import AmbiguousFormatError
+>>> with open('tests/json/hello-json.md', 'rb') as f:
+...     reading = frontmatter.interpret(f.read())
+>>> type(reading.handler).__name__
+'JSONHandler'
+>>> reading.content.startswith('\nTitle')
+True
+
+```
