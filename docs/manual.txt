@@ -24,6 +24,7 @@ Basic API and usage
 .. include:: manual/part2-6.txt
 .. include:: manual/part2-7.txt
 .. include:: manual/part2-8.txt
+.. include:: manual/part2-9.txt
 
 Convenience Scripts
 -------------------

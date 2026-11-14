@@ -1,0 +1,92 @@
+Merging readings with per-bit validity masks
+*********************************************
+A normal Intel HEX file stores one whole byte per address, so two readings
+that disagree on a single bit look like a complete byte conflict. Calibration
+equipment often reports a value plus a mask saying which bits were actually
+measured. Use ``intelhex.bitmerge`` when that distinction matters: it keeps the
+evidence per source and reports, for every bit, whether it is agreed, unread or
+in conflict.
+
+A masked reading
+----------------
+``MaskedReading`` holds readings from one source. Each address maps to a
+``(value, mask)`` pair; a set mask bit means that bit of the value was read::
+
+    >>> from intelhex import MaskedReading, merge_masked
+    >>> instrument_a = MaskedReading('A', {0x100: (0xAA, 0xF0)})
+    >>> instrument_b = MaskedReading('B', {0x100: (0xAB, 0x0F)})
+    >>> merge_masked([instrument_a, instrument_b]).is_certain(0x100)
+    True
+
+A value without a mask is treated as fully read. Values can also be supplied
+as a dictionary with ``value`` and ``mask`` keys, and masks can be loaded from
+separate Intel HEX files::
+
+    >>> reading = MaskedReading.from_hex('values.hex', 'masks.hex',
+    ...                                  source='instrument A')
+
+Bits outside the mask are cleared in the stored value: they were not read and
+must not create a disagreement.
+
+The three bit states
+--------------------
+``merge_masked`` replays readings and returns a ``MaskedMergeResult``. For each
+address, ``agreed``, ``unread`` and ``conflict`` are disjoint masks that
+together cover the whole byte. ``value`` contains the agreed bits only::
+
+    >>> from intelhex import MaskedReading, merge_masked
+    >>> only_a = MaskedReading('A', {0x100: (0xAA, 0xF0)})
+    >>> result = merge_masked([only_a])
+    >>> result.state(0x100)
+    BitState(value=160, agreed=240, unread=15, conflict=0)
+    >>> result.agreed_bits(0x100)
+    [4, 5, 6, 7]
+    >>> result.unread_bits(0x100)
+    [0, 1, 2, 3]
+
+A conflict on one bit does not quarantine the whole address. All agreed bits
+remain usable::
+
+    >>> a = MaskedReading('A', {0x100: (0xAA, 0xFF)})
+    >>> b = MaskedReading('B', {0x100: (0xAB, 0xFF)})
+    >>> result = merge_masked([a, b])
+    >>> result.state(0x100)
+    BitState(value=170, agreed=254, unread=0, conflict=1)
+    >>> result.conflict_values(0x100)
+    {0: [0, 1]}
+    >>> result.bit_state(0x100, 0)
+    'conflict'
+    >>> result.bit_state(0x100, 1)
+    '1'
+
+Sources and replay
+------------------
+Sources keep separate evidence. A reading with ``supersede=True`` replaces that
+same source's earlier readings; it cannot withdraw evidence supplied by any
+other source. Replaying files in order therefore works naturally::
+
+    >>> from intelhex import BitwiseMerger
+    >>> merger = BitwiseMerger()
+    >>> merger.add(MaskedReading('A', {0x100: (0x00, 0xFF)}))
+    >>> merger.add(MaskedReading('B', {0x100: (0xFF, 0xFF)}))
+    >>> merger.result().conflict_mask(0x100)
+    255
+    >>> merger.add(MaskedReading('B', {0x100: (0x00, 0xFF)}, supersede=True))
+    >>> merger.result().conflict_mask(0x100)
+    0
+
+The last reading retracts B's earlier opinion and leaves A's evidence intact,
+so the bit becomes certain again. A source that never supersedes its own prior
+reading contributes an additional observation; it is not treated as a
+replacement.
+
+Inspecting and exporting a result
+---------------------------------
+``MaskedMergeResult`` provides ``conflicts()``, ``unread()``,
+``certain_addresses()`` and ``summarize()`` for quick inspection.
+``to_dict()``/``to_json()`` include the per-address masks, agreed values and the
+ordered evidence; ``write_json()`` writes that description to a file.
+``to_intelhex()`` returns an ``IntelHex`` object containing only the agreed bits,
+which is suitable for writing a conventional HEX file. Because a HEX file has
+no place for masks, that output cannot represent unread or disputed bits;
+consult the result object when those distinctions matter.

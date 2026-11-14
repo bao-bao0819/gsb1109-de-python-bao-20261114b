@@ -34,6 +34,7 @@
 """Test suite for IntelHex library."""
 
 import array
+import json
 import os
 import shlex
 import subprocess
@@ -62,6 +63,11 @@ from intelhex import (
     BadAccess16bit,
     hex2bin,
     Record,
+    BitState,
+    MaskedReading,
+    BitwiseMerger,
+    MaskedMergeResult,
+    merge_masked,
     )
 from intelhex import compat
 from intelhex.compat import (
@@ -1241,6 +1247,314 @@ class TestIntelHexMerge(TestIntelHexBase):
         ih2 = IntelHex({'start_addr': {'EIP': 0x87654321}})
         ih1.merge(ih2, overlap='replace')
         self.assertEqual({'start_addr': {'EIP': 0x87654321}}, ih1.todict())
+
+
+class TestBitwiseMerge(TestIntelHexBase):
+
+    def test_three_same_address_calibrations_partition_bits(self):
+        # Same address read by three returned instruments.  Each byte has its
+        # own validity mask; the masks here cover different bit ranges.
+        rig1 = MaskedReading('rig-1', {0x200: (0xA0, 0xF0)})
+        rig2 = MaskedReading('rig-2', {0x200: (0xA3, 0x0F)})
+        rig3 = MaskedReading('rig-3', {0x200: (0xA5, 0x0F)})
+        r = merge_masked([rig1, rig2, rig3])
+        state = r.state(0x200)
+        self.assertEqual(0xA1, state.value)      # high nibble and bit 0 agree
+        self.assertEqual(0xF9, state.agreed)
+        self.assertEqual(0x00, state.unread)     # every bit was read by someone
+        self.assertEqual(0x06, state.conflict)   # rig-2 and rig-3 dispute bits 1,2
+        self.assertEqual({1: [0, 1], 2: [0, 1]}, r.conflict_values(0x200))
+        # The whole address is not rejected just because two bits disagree.
+        self.assertEqual([0, 3, 4, 5, 6, 7], r.agreed_bits(0x200))
+
+    def test_masks_partition_and_disjoint(self):
+        a = MaskedReading('a', {0: (0xAA, 0xF0)})
+        b = MaskedReading('b', {0: (0x5A, 0x0F)})
+        r = merge_masked([a, b])
+        state = r.state(0)
+        self.assertEqual(0xFF, state.agreed | state.unread | state.conflict)
+        self.assertEqual(0, state.agreed & state.unread)
+        self.assertEqual(0, state.agreed & state.conflict)
+        self.assertEqual(0, state.unread & state.conflict)
+        self.assertEqual(0, state.unread)
+        self.assertEqual(0, state.conflict)
+        self.assertEqual(0xAA, state.value)
+
+    def test_conflict_only_affects_disputed_bits(self):
+        a = MaskedReading('a', {0x10: (0xAA, 0xFF)})
+        b = MaskedReading('b', {0x10: (0xAB, 0xFF)})
+        r = merge_masked([a, b])
+        state = r.state(0x10)
+        self.assertEqual(0x01, state.conflict)
+        self.assertEqual(0xFE, state.agreed)
+        self.assertEqual(0, state.unread)
+        self.assertEqual([0], r.conflict_bits(0x10))
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7], r.agreed_bits(0x10))
+        self.assertEqual('conflict', r.bit_state(0x10, 0))
+        self.assertEqual('1', r.bit_state(0x10, 1))
+        self.assertEqual({0: [0, 1]}, r.conflict_values(0x10))
+        self.assertEqual(0xAA, r.value(0x10))
+        self.assertFalse(r.is_certain(0x10))
+
+    def test_unread_bits(self):
+        a = MaskedReading('a', {5: (0xFF, 0x0F)})
+        r = merge_masked(a)
+        self.assertEqual(0x0F, r.agreed_mask(5))
+        self.assertEqual(0xF0, r.unread_mask(5))
+        self.assertEqual(0, r.conflict_mask(5))
+        self.assertEqual('unread', r.bit_state(5, 4))
+        self.assertEqual('1', r.bit_state(5, 3))
+        self.assertEqual('unread', r.bit_state(5, 7))
+        self.assertEqual([4, 5, 6, 7], r.unread_bits(5))
+        self.assertFalse(r.is_certain(5))
+
+    def test_unread_is_absent_not_zero(self):
+        a = MaskedReading('a', {7: (0x00, 0x01)})
+        b = MaskedReading('b', {7: (0x80, 0x80)})
+        r = merge_masked([a, b])
+        self.assertEqual(0x81, r.agreed_mask(7))
+        self.assertEqual(0x7E, r.unread_mask(7))
+        self.assertEqual(0x80, r.value(7))
+        self.assertEqual(0, r.conflict_mask(7))
+
+    def test_later_reading_supersedes_only_own_source(self):
+        first = MaskedReading('a', {0: (0x00, 0xFF)})
+        other = MaskedReading('b', {0: (0xFF, 0xFF)})
+        union = MaskedReading('a', {0: (0xFF, 0xFF)}, supersede=True)
+        r = merge_masked([first, other, union])
+        # 'a' now agrees with 'b'; the earlier conflicting 'a' observation
+        # was superseded by its own source, not by evidence from 'b'.
+        self.assertEqual(0xFF, r.agreed_mask(0))
+        self.assertEqual(0, r.conflict_mask(0))
+        self.assertEqual(0xFF, r.value(0))
+        self.assertEqual(['a', 'b'], r.sources)
+
+    def test_superseding_other_source_keeps_first_source_evidence(self):
+        a = MaskedReading('a', {0: (0x00, 0xFF)})
+        b1 = MaskedReading('b', {0: (0x00, 0xFF)})
+        b2 = MaskedReading('b', {0: (0xFF, 0x01)}, supersede=True)
+        r = merge_masked([a, b1, b2])
+        # b2 supersedes b1 but cannot withdraw a's observation; bit 0 is
+        # still disputed, while bits 1-7 only come from a.
+        self.assertEqual(0x01, r.conflict_mask(0))
+        self.assertEqual(0xFE, r.agreed_mask(0))
+        self.assertEqual(0, r.unread_mask(0))
+        self.assertEqual({0: [0, 1]}, r.conflict_values(0))
+        self.assertEqual({0: ['a'], 1: ['b']}, r.bit_evidence(0, 0))
+        self.assertEqual({0: ['a'], 1: []}, r.bit_evidence(0, 1))
+
+    def test_replay_can_make_conflict_certain_again(self):
+        a1 = MaskedReading('a', {0: (0x00, 0x01)})
+        b1 = MaskedReading('b', {0: (0xFF, 0x01)})
+        r1 = merge_masked([a1, b1])
+        self.assertEqual(0x01, r1.conflict_mask(0))
+        # A later declaration from the disagreeing source retracts its own
+        # earlier bit; the surviving evidence now agrees.
+        b2 = MaskedReading('b', {0: (0x00, 0x01)}, supersede=True)
+        r2 = merge_masked([a1, b1, b2])
+        self.assertEqual(0, r2.conflict_mask(0))
+        self.assertEqual(0x01, r2.agreed_mask(0))
+        self.assertEqual(0xFE, r2.unread_mask(0))
+        self.assertFalse(r2.is_certain(0))
+
+    def test_merger_incremental_equals_replay(self):
+        readings = [
+            MaskedReading('a', {3: (0x12, 0xFF)}),
+            MaskedReading('b', {3: (0x12, 0x0F), 4: (0x34, 0xF0)}),
+            MaskedReading('a', {4: (0x34, 0x0F)}, supersede=True),
+        ]
+        merger = BitwiseMerger()
+        replay = []
+        for reading in readings:
+            merger.add(reading)
+            replay.append(merger.result().to_dict())
+        self.assertEqual(replay[-1], merge_masked(readings).to_dict())
+
+    def test_merge_masked_rejects_bad_input(self):
+        self.assertRaises(TypeError, merge_masked, [object()])
+        self.assertRaises(ValueError, MaskedReading, None)
+        self.assertRaises(ValueError, MaskedReading, 'a', {0: (256, 0xFF)})
+        self.assertRaises(ValueError, MaskedReading, 'a', {0: (0xFF, 256)})
+        self.assertRaises(ValueError, MaskedReading, 'a', {0: (0xFF,)})
+        self.assertRaises(TypeError, MaskedReading, 'a', {-1: 0xFF})
+        self.assertRaises(TypeError, MaskedReading, [], {0: 0xFF})
+
+    def test_discard_source_and_clear(self):
+        merger = BitwiseMerger()
+        merger.add(MaskedReading('a', {0: (0x00, 0xFF)}))
+        merger.add(MaskedReading('b', {0: (0xFF, 0xFF)}))
+        self.assertEqual(0xFF, merger.result().conflict_mask(0))
+        merger.discard('b')
+        self.assertEqual(0, merger.result().conflict_mask(0))
+        self.assertEqual(['a'], merger.sources())
+        merger.clear()
+        self.assertEqual([], merger.result().addresses())
+        self.assertEqual([], merger.sources())
+
+    def test_from_hex_and_json_roundtrip(self):
+        values = IntelHex({0x100: 0xAA, 0x101: 0x05})
+        masks = IntelHex({0x100: 0xF0, 0x101: 0x0F})
+        import tempfile
+        import os
+        fd, vname = tempfile.mkstemp(suffix='.hex')
+        os.close(fd)
+        fd, mname = tempfile.mkstemp(suffix='.hex')
+        os.close(fd)
+        try:
+            values.write_hex_file(vname)
+            masks.write_hex_file(mname)
+            reading = MaskedReading.from_hex(vname, mname, source='instrument')
+            self.assertEqual((0xA0, 0xF0), reading[0x100])
+            self.assertEqual((0x05, 0x0F), reading[0x101])
+            payload = reading.to_json_dict()
+            self.assertEqual('instrument', payload['source'])
+            restored = MaskedReading.from_json(reading.to_json())
+            self.assertEqual(reading.to_dict(), restored.to_dict())
+            self.assertEqual('instrument', restored.source)
+        finally:
+            os.unlink(vname)
+            os.unlink(mname)
+
+    def test_from_hex_rejects_bad_mask_coverage(self):
+        values = IntelHex({0: 0xAA})
+        masks = IntelHex({1: 0xFF})
+        import tempfile
+        import os
+        fd, vname = tempfile.mkstemp(suffix='.hex')
+        os.close(fd)
+        fd, mname = tempfile.mkstemp(suffix='.hex')
+        os.close(fd)
+        try:
+            values.write_hex_file(vname)
+            masks.write_hex_file(mname)
+            # Address 0 has no mask and address 1 has no value.
+            self.assertRaises(ValueError, MaskedReading.from_hex, vname, mname)
+        finally:
+            os.unlink(vname)
+            os.unlink(mname)
+
+        masks = IntelHex({0: 0xF0})
+        fd, vname = tempfile.mkstemp(suffix='.hex')
+        os.close(fd)
+        fd, mname = tempfile.mkstemp(suffix='.hex')
+        os.close(fd)
+        try:
+            values.write_hex_file(vname)
+            masks.write_hex_file(mname)
+            reading = MaskedReading.from_hex(vname, mname)
+            self.assertEqual((0xA0, 0xF0), reading[0])
+        finally:
+            os.unlink(vname)
+            os.unlink(mname)
+
+    def test_from_hex_default_mask_for_missing_address(self):
+        values = IntelHex({0: 0xAA, 1: 0x0F})
+        masks = IntelHex({1: 0x0F})
+        import tempfile
+        import os
+        fd, vname = tempfile.mkstemp(suffix='.hex')
+        os.close(fd)
+        fd, mname = tempfile.mkstemp(suffix='.hex')
+        os.close(fd)
+        try:
+            values.write_hex_file(vname)
+            masks.write_hex_file(mname)
+            self.assertRaises(ValueError, MaskedReading.from_hex, vname, mname)
+            reading = MaskedReading.from_hex(vname, mname,
+                                             default_mask=0xFF)
+            self.assertEqual((0xAA, 0xFF), reading[0])
+            self.assertEqual((0x0F, 0x0F), reading[1])
+        finally:
+            os.unlink(vname)
+            os.unlink(mname)
+
+    def test_result_export_and_readme_states(self):
+        a = MaskedReading('a', {2: (0x01, 0x01)})
+        b = MaskedReading('b', {2: (0x80, 0x83)})
+        r = merge_masked([a, b])
+        self.assertEqual([2], r.addresses())
+        self.assertEqual([2], list(r))
+        self.assertIn(2, r)
+        self.assertNotIn(3, r)
+        ih = r.to_intelhex()
+        self.assertEqual(0x80, ih[2])
+        d = r.to_dict()
+        self.assertEqual(['a', 'b'], d['sources'])
+        self.assertEqual('conflict', r.bit_state(2, 0))
+        self.assertEqual('1', r.bit_state(2, 7))
+        self.assertEqual('0', r.bit_state(2, 1))
+        self.assertEqual('unread', r.bit_state(2, 2))
+        self.assertRaises(ValueError, r.bit_state, 2, 8)
+
+    def test_summary_helpers(self):
+        readings = [
+            MaskedReading('a', {0: (0x00, 0xFF), 1: (0x0F, 0x0F)}),
+            MaskedReading('b', {0: (0x01, 0xFF)}),
+        ]
+        r = merge_masked(readings)
+        self.assertEqual({0: 0x01}, r.conflicts())
+        self.assertEqual({1: 0xF0}, r.unread())
+        self.assertEqual([], r.certain_addresses())
+        self.assertEqual('2 addresses, 1 with conflicts, 1 with unread bits',
+                         r.summarize())
+
+    def test_all_unread_address_not_exported_as_zero(self):
+        r = merge_masked([MaskedReading('a', {9: (0xFF, 0x00)})])
+        self.assertEqual(0, r.agreed_mask(9))
+        self.assertEqual(0xFF, r.unread_mask(9))
+        self.assertEqual(0, len(r.to_intelhex()))
+
+    def test_merge_masked_accepts_declarative_records(self):
+        r = merge_masked([
+            {'source': 'a', 'bytes': {0: [0x0F, 0x0F]}},
+            ('b', {0: (0x10, 0xF0)}),
+        ])
+        self.assertEqual(0xFF, r.agreed_mask(0))
+        self.assertEqual(0x1F, r.value(0))
+        self.assertEqual(['a', 'b'], r.sources)
+        self.assertRaises(ValueError, merge_masked,
+                          [{'bytes': {0: 0x00}}])
+
+    def test_merge_masked_accepts_source_values_masks_triples(self):
+        r = merge_masked([
+            ('a', {0: 0x0F}, {0: 0x0F}),
+            ('b', {0: 0x00}, {0: 0xF0}),
+            ('c', {0: 0x10}, {0: 0xF0}),
+        ])
+        self.assertEqual(0x0F, r.value(0))
+        self.assertEqual(0xEF, r.agreed_mask(0))
+        self.assertEqual(0x10, r.conflict_mask(0))
+        self.assertEqual({4: [0, 1]}, r.conflict_values(0))
+
+    def test_from_intelhex_and_mask_coverage(self):
+        values = IntelHex({0x20: 0x12, 0x21: 0x34})
+        masks = IntelHex({0x20: 0xFF})
+        self.assertRaises(ValueError, MaskedReading.from_intelhex,
+                          values, masks)
+
+    def test_from_intelhex_accepts_mapping(self):
+        reading = MaskedReading.from_intelhex(
+            {0x20: 0x12, 0x21: 0x34},
+            {0x20: 0xFF, 0x21: 0xF0},
+            source='mapped')
+        self.assertEqual((0x12, 0xFF), reading[0x20])
+        self.assertEqual((0x30, 0xF0), reading[0x21])
+        self.assertEqual('mapped', reading.source)
+
+    def test_json_export_contains_masks_and_evidence(self):
+        r = merge_masked([
+            MaskedReading('a', {0: (0x0F, 0x0F)}),
+            MaskedReading('b', {0: (0x10, 0xF0)}),
+        ])
+        payload = json.loads(r.to_json())
+        item = payload['addresses'][0]
+        self.assertEqual(0, item['address'])
+        self.assertEqual(0xFF, item['agreed_mask'])
+        self.assertEqual(0, item['unread_mask'])
+        self.assertEqual(0, item['conflict_mask'])
+        self.assertEqual(2, len(item['evidence']))
+        self.assertEqual(0x1F, item['value'])
+
 
 
 class TestIntelHex16bit(TestIntelHexBase):

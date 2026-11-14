@@ -1382,3 +1382,14 @@ class BadAccess16bit(NotEnoughDataError):
 
 class EmptyIntelHexError(IntelHexError):
     _fmt = "Requested operation cannot be executed with empty object"
+
+
+# Bit-level provenance-aware merging.  Imported lazily-friendly: the module
+# itself only needs IntelHex when loading from files.
+from intelhex.bitmerge import (    # noqa: E402
+    BitState,
+    MaskedReading,
+    BitwiseMerger,
+    MaskedMergeResult,
+    merge_masked,
+    )
