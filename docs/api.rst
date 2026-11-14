@@ -33,6 +33,12 @@ Post objects
     :special-members: __getitem__, __setitem__, __delitem__
 
 
+Translations
+------------
+
+.. autofunction:: frontmatter.export_translation_groups
+
+
 Handlers
 --------
 

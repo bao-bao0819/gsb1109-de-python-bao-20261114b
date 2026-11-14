@@ -15,9 +15,26 @@ from .util import can_open, is_readable, is_writable, u
 
 if TYPE_CHECKING:
     from .default_handlers import BaseHandler
+    from .translations import export_translation_groups
 
 
-__all__ = ["parse", "load", "loads", "dump", "dumps"]
+def __getattr__(name: str) -> object:
+    "Load optional helpers on first use."
+    if name == "export_translation_groups":
+        from .translations import export_translation_groups
+
+        return export_translation_groups
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = [
+    "parse",
+    "load",
+    "loads",
+    "dump",
+    "dumps",
+    "export_translation_groups",
+]
 
 
 # global handlers

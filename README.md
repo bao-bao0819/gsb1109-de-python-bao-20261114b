@@ -132,4 +132,46 @@ Well, hello there, world.
 
 ```
 
+## Translation groups
+
+If a collection of Markdown articles declares translations in front matter, you
+can export the groups that the declarations actually confirm:
+
+```python
+>>> report = frontmatter.export_translation_groups('examples/translations/articles')
+>>> report['summary']['groups']
+3
+
+```
+
+Each article carries its own key and may point at translations by language:
+
+```yaml
+---
+key: en-nginx
+lang: en
+translations:
+  zh: zh-nginx
+  fr: fr-nginx
+---
+```
+
+A pair is reported as `mutual_pairs` only when both documents declare each
+other. A declaration with no matching reverse declaration lands in `one_way`.
+Conflicts, ambiguous links and duplicate keys are kept in `conflicts`, and a
+declaration that names an old URL is resolved through `redirect_from`/`aliases`
+or `redirect_to` so the report quotes the current document key.
+
+If a declaration chain would contain two primaries in the same language — for
+example two different French primary articles — the chain is not merged into a
+single group. It is listed in `blocked_chains`, while any pair confirmed inside
+it still appears in `mutual_pairs`. Missing targets are never replaced by a
+document that merely shares the same title, even when that document is a draft.
+
+From the command line:
+
+```shell
+python -m frontmatter.translations path/to/articles > translation-groups.json
+```
+
 For more examples, see files in the `tests/` directory. Each sample file has a corresponding `.result.json` file showing the expected parsed output. See also the `examples/` directory, which covers more ways to customize input and output.
