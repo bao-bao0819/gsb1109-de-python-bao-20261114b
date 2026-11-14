@@ -139,6 +139,34 @@ parsed output. See also the ``examples/`` directory, which covers more
 ways to customize input and output.
 
 
+Migrating YAML and TOML to JSON
+-------------------------------
+
+``frontmatter.migrate`` turns a document into a migration artifact: plain
+JSON metadata, a ``types`` table of JSON Pointer paths for values whose
+Python type JSON cannot express, and the body text unchanged.
+
+::
+
+    >>> artifact = frontmatter.migrate('---\npublished: 2024-05-01\n---\n\nBody\n')
+    >>> artifact.metadata, artifact.types
+    ({'published': '2024-05-01'}, {'/published': 'date'})
+    >>> frontmatter.restore(artifact)
+    '---\npublished: 2024-05-01\n---\n\nBody\n'
+
+Dates and date-like strings, decimal floats and integers, large integers and
+explicit nulls each keep their own identity. The type table is stored beside
+the metadata, so source fields with reserved names never collide with the
+artifact's own keys. ``frontmatter.verify`` checks values, types and the body
+bytes of a restored document.
+
+For command line use::
+
+    python -m frontmatter.migration convert old.md -o old.json
+    python -m frontmatter.migration restore old.json -o old.md
+    python -m frontmatter.migration verify old.json --against old.md
+
+
 .. toctree::
    :maxdepth: 2
 

@@ -1,0 +1,19 @@
+---
+published: 2024-05-01
+published_text: "2024-05-01"
+ratio: 1.20
+views: 42
+reach: 1208925819614629174706176
+empty:
+explicit_null: null
+content: a front matter field
+types: also a field
+metadata: one more
+version: 7
+---
+
+Intro
+---
+This line is a horizontal rule, not a fence.
+
+Trailing paragraph.

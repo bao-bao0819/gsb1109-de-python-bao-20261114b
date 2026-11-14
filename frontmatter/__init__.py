@@ -5,6 +5,7 @@ Python Frontmatter: Parse and manage posts with YAML frontmatter
 
 from __future__ import annotations
 
+import importlib
 import io
 import pathlib
 from os import PathLike
@@ -15,9 +16,90 @@ from .util import can_open, is_readable, is_writable, u
 
 if TYPE_CHECKING:
     from .default_handlers import BaseHandler
+    from .migration import (
+        MigrationArtifact,
+        MigrationError,
+        VerificationError,
+        artifact_dumps,
+        artifact_loads,
+        migrate,
+        migrate_file,
+        restore,
+        restore_file,
+        verify,
+        verify_file,
+    )
+    from .serialization import (
+        SerializationError,
+        UnsupportedTypeError,
+        decode_metadata,
+        encode_metadata,
+    )
 
 
-__all__ = ["parse", "load", "loads", "dump", "dumps"]
+__all__ = [
+    "parse",
+    "load",
+    "loads",
+    "dump",
+    "dumps",
+    "migrate",
+    "migrate_file",
+    "restore",
+    "restore_file",
+    "verify",
+    "verify_file",
+    "artifact_dumps",
+    "artifact_loads",
+    "MigrationArtifact",
+    "MigrationError",
+    "VerificationError",
+    "SerializationError",
+    "UnsupportedTypeError",
+    "encode_metadata",
+    "decode_metadata",
+    "ARTIFACT_VERSION",
+]
+
+_LAZY_EXPORTS = {
+    "migrate",
+    "migrate_file",
+    "restore",
+    "restore_file",
+    "verify",
+    "verify_file",
+    "artifact_dumps",
+    "artifact_loads",
+    "MigrationArtifact",
+    "MigrationError",
+    "VerificationError",
+    "SerializationError",
+    "UnsupportedTypeError",
+    "encode_metadata",
+    "decode_metadata",
+    "ARTIFACT_VERSION",
+}
+
+
+def __getattr__(name: str) -> object:
+    # Migration support lives in its own modules so that importing
+    # ``frontmatter`` stays as light as it was before this feature.
+    if name in _LAZY_EXPORTS:
+        if name == "ARTIFACT_VERSION":
+            return importlib.import_module("frontmatter.migration").ARTIFACT_VERSION
+        module_name = (
+            "frontmatter.serialization"
+            if name
+            in {
+                "SerializationError",
+                "UnsupportedTypeError",
+                "encode_metadata",
+                "decode_metadata",
+            }
+            else "frontmatter.migration"
+        )
+        return getattr(importlib.import_module(module_name), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # global handlers
