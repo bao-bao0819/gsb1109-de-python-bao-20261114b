@@ -1,5 +1,11 @@
 from importlib.metadata import version as _dist_version
 
+from .idle import (
+    IdleBounds,
+    InfeasibleScheduleError,
+    MachineIdleBounds,
+    idle_bounds,
+)
 from .junitparser import (
     Attr,
     Element,
@@ -26,9 +32,12 @@ __all__ = [
     "Error",
     "Failure",
     "FloatAttr",
+    "IdleBounds",
+    "InfeasibleScheduleError",
     "IntAttr",
     "JUnitXml",
     "JUnitXmlError",
+    "MachineIdleBounds",
     "Properties",
     "Property",
     "Skipped",
@@ -36,5 +45,6 @@ __all__ = [
     "SystemErr",
     "TestCase",
     "TestSuite",
+    "idle_bounds",
     "version",
 ]
