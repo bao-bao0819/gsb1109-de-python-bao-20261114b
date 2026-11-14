@@ -11,13 +11,24 @@ from os import PathLike
 from typing import TYPE_CHECKING, Iterable, TextIO
 
 from .default_handlers import JSONHandler, TOMLHandler, YAMLHandler
-from .util import can_open, is_readable, is_writable, u
+from .locations import Location, SourceMap, build_source_map
+from .util import can_open, is_readable, is_writable, strip_bom, u
 
 if TYPE_CHECKING:
     from .default_handlers import BaseHandler
 
 
-__all__ = ["parse", "load", "loads", "dump", "dumps"]
+__all__ = [
+    "parse",
+    "load",
+    "loads",
+    "dump",
+    "dumps",
+    "Post",
+    "Location",
+    "SourceMap",
+    "build_source_map",
+]
 
 
 # global handlers
@@ -72,7 +83,7 @@ def parse(
 
     """
     # ensure unicode first
-    text = u(text, encoding).strip()
+    text = strip_bom(u(text, encoding).strip())
 
     # metadata starts with defaults
     metadata = defaults.copy()
@@ -138,7 +149,7 @@ def checks(text: str, encoding: str = "utf-8") -> bool:
         True
 
     """
-    text = u(text, encoding)
+    text = strip_bom(u(text, encoding))
     return detect_format(text, handlers) != None
 
 
@@ -188,10 +199,25 @@ def loads(
         ...     post = frontmatter.loads(f.read())
 
     """
-    text = u(text, encoding)
+    original = text
+    text = strip_bom(u(text, encoding))
     handler = handler or detect_format(text, handlers)
     metadata, content = parse(text, encoding, handler, **defaults)
-    return Post(content, handler, **metadata)
+
+    # Build the source map from the *original* input (still bytes or carrying
+    # CRLF/BOM) so byte offsets land on the real document. Custom handlers
+    # without source-location support simply contribute ``None``; mapping is
+    # best-effort and must never get in the way of parsing.
+    source_map = None
+    if handler is not None:
+        build_map = getattr(handler, "build_source_map", None)
+        if build_map is not None:
+            try:
+                source_map = build_map(original, encoding)
+            except Exception:
+                source_map = None
+
+    return Post(content, handler, source_map=source_map, **metadata)
 
 
 def dump(
@@ -304,11 +330,16 @@ class Post(object):
     """
 
     def __init__(
-        self, content: str, handler: BaseHandler | None = None, **metadata: object
+        self,
+        content: str,
+        handler: BaseHandler | None = None,
+        source_map: SourceMap | None = None,
+        **metadata: object,
     ) -> None:
         self.content = str(content)
         self.metadata = metadata
         self.handler = handler
+        self.source_map = source_map
 
     def __getitem__(self, name: str) -> object:
         "Get metadata key"

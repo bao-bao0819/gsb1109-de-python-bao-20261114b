@@ -33,6 +33,26 @@ Post objects
     :special-members: __getitem__, __setitem__, __delitem__
 
 
+Source locations
+----------------
+
+A parsed :class:`~frontmatter.Post` exposes a :class:`~frontmatter.SourceMap`
+as ``post.source_map`` (YAML only; other handlers set it to ``None``). Use it
+to map a metadata field path back to the raw byte range where the value was
+written, including folded multi-line scalars, anchors/aliases and quoted keys
+that contain dots, and to reverse-lookup the fields touched by a source line
+or byte offset. Offsets stay byte-accurate for documents with a BOM or CRLF
+line endings.
+
+.. autoclass:: frontmatter.SourceMap
+    :members:
+
+.. autoclass:: frontmatter.Location
+    :members:
+
+.. autofunction:: frontmatter.build_source_map
+
+
 Handlers
 --------
 

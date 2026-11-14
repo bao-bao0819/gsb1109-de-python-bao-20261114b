@@ -103,6 +103,56 @@ Hello, world!
 
 ```
 
+## Source locations
+
+When an indexer reports a metadata path, you may want to highlight where that
+value was actually written in the original document. A parsed post carries a
+`source_map` (YAML only) that maps field paths to raw byte ranges, and back
+again. Offsets are byte-accurate even for documents with a leading BOM or CRLF
+line endings.
+
+```python
+>>> doc = '''---
+... base: &d
+...   x: 1
+... ref: *d
+... "a.b": dotted
+... ---
+... body
+... '''
+>>> mapped_post = frontmatter.loads(doc)
+>>> source_map = mapped_post.source_map
+>>> [location.kind for location in source_map.for_path(('ref',))]
+['key', 'alias']
+>>> alias = source_map.for_path(('ref',))[-1]
+>>> doc.encode()[alias.start:alias.end]
+b'*d'
+>>> alias.is_reference and alias.target == ('base',)
+True
+
+```
+
+An alias reference (`*d`) and the anchor declaration (`&d`) are recorded
+separately. Quoted keys that contain dots need a tuple path so they are not
+mistaken for nested fields:
+
+```python
+>>> [location.kind for location in source_map.for_path(('a.b',))]
+['key', 'value']
+>>> source_map.for_path('a.b')
+[]
+
+```
+
+Reverse-lookup from a source position returns every field touching that line
+or byte offset, most specific first:
+
+```python
+>>> [(location.path, location.kind) for location in source_map.at_byte(alias.start)]
+[(('ref',), 'alias')]
+
+```
+
 Write back to plain text, too:
 
 ```python

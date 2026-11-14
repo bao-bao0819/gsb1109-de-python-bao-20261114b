@@ -220,6 +220,16 @@ class BaseHandler:
         """
         raise NotImplementedError
 
+    def build_source_map(self, text: str | bytes, encoding: str = "utf-8") -> Any:
+        """
+        Build a source-location index for the front matter in ``text``.
+
+        Handlers that cannot map fields back to source bytes return ``None``
+        (the default). The YAML handler overrides this to power
+        ``Post.source_map``.
+        """
+        return None
+
     def export(self, metadata: dict[str, object], **kwargs: object) -> str:
         """
         Turn metadata back into text
@@ -258,6 +268,26 @@ class YAMLHandler(BaseHandler):
         """
         kwargs.setdefault("Loader", SafeLoader)
         return yaml.load(fm, **kwargs)  # type: ignore[arg-type]
+
+    def build_source_map(self, text: str | bytes, encoding: str = "utf-8") -> Any:
+        """
+        Build a :class:`~frontmatter.locations.SourceMap` linking metadata
+        field paths to their original byte ranges, including folded scalars,
+        anchors/aliases and quoted dotted keys.
+        """
+        from .locations import build_source_map
+
+        # Source mapping relies on the standard compiled boundary and a
+        # leading front-matter block. Custom handlers that override the
+        # boundary type or layout opt out by returning ``None``.
+        if not isinstance(self.FM_BOUNDARY, re.Pattern):
+            return None
+        return build_source_map(
+            text,
+            encoding=encoding,
+            boundary=self.FM_BOUNDARY,
+            loader=SafeLoader,
+        )
 
     def export(self, metadata: dict[str, object], **kwargs: object) -> str:
         """
