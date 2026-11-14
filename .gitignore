@@ -1,0 +1,24 @@
+.idea
+*.bak
+*.egg
+*.egg-info/
+*.pyc
+.cache/
+.coverage
+.coverage.*
+.eggs/
+dist/
+build/
+_build/
+output/
+.tox/
+*.swp
+.vscode
+.idea
+tags
+.DS_Store
+test.log
+tftpy.egg-info
+# PyCharm
+.idea/
+coverage.xml
