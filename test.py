@@ -3037,6 +3037,96 @@ class PgnTestCase(unittest.TestCase):
             game = chess.pgn.read_game(pgn)
             self.assertEqual(game, None)
 
+    def test_merge_annotations(self):
+        plain = chess.pgn.read_game(io.StringIO("1. e4 e5 2. Nf3 Nc6 *"))
+        annotated = chess.pgn.read_game(io.StringIO("""
+            [White "Anna"]
+            1. e4 { Best by test } e5 $1 (1... c5 { Sicilian }) 2. Nf3 { Develops } Nc6 *
+        """))
+
+        merged = plain.merge(annotated)
+        self.assertEqual(merged.headers["White"], "Anna")
+        self.assertEqual(list(merged.mainline_moves()), list(annotated.mainline_moves()))
+
+        e4 = merged.variations[0]
+        self.assertEqual(e4.comments, ["Best by test"])
+        self.assertEqual(len(e4.variations), 2)
+        self.assertEqual(e4.variations[1].san(), "c5")
+        self.assertEqual(e4.variations[1].comments, ["Sicilian"])
+        e5 = e4.variations[0]
+        self.assertEqual(e5.nags, {1})
+        nf3 = e5.variations[0]
+        self.assertEqual(nf3.comments, ["Develops"])
+
+        # Merging is idempotent with respect to duplicate comments.
+        self.assertEqual(plain.merge(plain).variations[0].comments, [])
+
+    def test_merge_diverging_mainlines(self):
+        first = chess.pgn.read_game(io.StringIO("1. e4 e5 2. Nf3 Nc6 *"))
+        second = chess.pgn.read_game(io.StringIO("1. e4 e5 2. Bc4 { annotated } Nf6 *"))
+
+        merged = first.merge(second)
+
+        # The confirmed mainline is frozen at 1... e5: Both continuations
+        # are kept as variations of that node, neither is merged in.
+        e5 = merged.variations[0].variations[0]
+        self.assertEqual(e5.move.uci(), "e7e5")
+        self.assertEqual(len(e5.variations), 2)
+        self.assertEqual(e5.variations[0].san(), "Nf3")
+        self.assertEqual(e5.variations[1].san(), "Bc4")
+        self.assertEqual(e5.variations[1].comments, ["annotated"])
+        self.assertEqual(e5.variations[0].variations[0].san(), "Nc6")
+        self.assertEqual(e5.variations[1].variations[0].san(), "Nf6")
+
+    def test_merge_one_sided_continuation(self):
+        short = chess.pgn.read_game(io.StringIO("1. e4 e5 *"))
+        long = chess.pgn.read_game(io.StringIO("1. e4 e5 2. Nf3 { note } *"))
+
+        merged = short.merge(long)
+        self.assertEqual([move.uci() for move in merged.mainline_moves()], ["e2e4", "e7e5", "g1f3"])
+        self.assertEqual(merged.end().comments, ["note"])
+
+    def test_merge_transpositions(self):
+        first = chess.pgn.read_game(io.StringIO("1. e4 e5 2. Nf3 Nc6 *"))
+        second = chess.pgn.read_game(io.StringIO("1. Nf3 e5 2. e4 Nc6 *"))
+
+        merged = first.merge(second)
+        # The same position is reachable via both move orders: Both paths
+        # are kept, even though they transpose.
+        self.assertEqual(len(merged.variations), 2)
+        self.assertEqual(merged.variations[0].san(), "e4")
+        self.assertEqual(merged.variations[1].san(), "Nf3")
+        self.assertEqual(len(list(merged.variations[0].mainline_moves())), 3)
+        self.assertEqual(len(list(merged.variations[1].mainline_moves())), 3)
+        self.assertEqual(merged.variations[0].end().board().epd(), merged.variations[1].end().board().epd())
+
+    def test_merge_shared_variations(self):
+        first = chess.pgn.read_game(io.StringIO("1. e4 c5 (1... e5 2. Nf3) 2. Nf3 *"))
+        second = chess.pgn.read_game(io.StringIO("1. e4 c5 (1... e5 2. Bc4) (1... e6) 2. Nf3 *"))
+
+        merged = first.merge(second)
+        e4 = merged.variations[0]
+        self.assertEqual(len(e4.variations), 3)
+        self.assertEqual(e4.variations[0].san(), "c5")
+        self.assertEqual(e4.variations[1].san(), "e5")
+        self.assertEqual(e4.variations[2].san(), "e6")
+
+        # The shared 1... e5 sideline keeps both continuations.
+        e5 = e4.variations[1]
+        self.assertEqual(len(e5.variations), 2)
+        self.assertEqual(e5.variations[0].san(), "Nf3")
+        self.assertEqual(e5.variations[1].san(), "Bc4")
+
+    def test_merge_different_positions(self):
+        first = chess.pgn.read_game(io.StringIO("1. e4 e5 *"))
+        second = chess.pgn.read_game(io.StringIO(textwrap.dedent("""\
+            [FEN "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2"]
+            [SetUp "1"]
+
+            2... Nc6 *""")))
+        with self.assertRaises(ValueError):
+            first.merge(second)
+
 
 @unittest.skipIf(sys.platform == "win32" and (3, 8, 0) <= sys.version_info < (3, 8, 1), "https://bugs.python.org/issue34679")
 class EngineTestCase(unittest.TestCase):

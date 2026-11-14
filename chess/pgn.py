@@ -825,6 +825,67 @@ class ChildNode(GameNode):
 
 GameT = TypeVar("GameT", bound="Game")
 
+def _merge_comments(first: list[str], second: list[str]) -> list[str]:
+    comments = list(first)
+    for comment in second:
+        if comment not in comments:
+            comments.append(comment)
+    return comments
+
+
+def _copy_variation(parent: GameNode, node: ChildNode) -> ChildNode:
+    copy = parent.add_variation(
+        node.move,
+        comment=list(node.comments),
+        starting_comment=list(node.starting_comments),
+        nags=set(node.nags))
+    for variation in node.variations:
+        _copy_variation(copy, variation)
+    return copy
+
+
+def _merge_variations(parent: GameNode, first: List[ChildNode], second: List[ChildNode]) -> None:
+    remaining = list(second)
+    for node in first:
+        for index, other in enumerate(remaining):
+            if other.move == node.move:
+                del remaining[index]
+                _merge_nodes(parent, node, other)
+                break
+        else:
+            _copy_variation(parent, node)
+    for other in remaining:
+        _copy_variation(parent, other)
+
+
+def _merge_nodes(parent: GameNode, first: ChildNode, second: ChildNode) -> ChildNode:
+    node = parent.add_variation(
+        first.move,
+        comment=_merge_comments(first.comments, second.comments),
+        starting_comment=_merge_comments(first.starting_comments, second.starting_comments),
+        nags=first.nags | second.nags)
+    _merge_position(node, first, second)
+    return node
+
+
+def _merge_position(target: GameNode, first: GameNode, second: GameNode) -> None:
+    first_main = first.variations[0] if first.variations else None
+    second_main = second.variations[0] if second.variations else None
+
+    if first_main is not None and second_main is not None:
+        if first_main.move == second_main.move:
+            # Both sides confirm the same next move: Extend the mainline.
+            _merge_nodes(target, first_main, second_main)
+            _merge_variations(target, first.variations[1:], second.variations[1:])
+        else:
+            # Irreconcilable disagreement on the next move: Freeze the
+            # mainline and keep both continuations as variations.
+            _merge_variations(target, first.variations, second.variations)
+    else:
+        # Only one side continues, so its continuation is uncontradicted.
+        _merge_variations(target, first.variations, second.variations)
+
+
 class Game(GameNode):
     """
     The root node of a game with extra information such as headers and the
@@ -932,6 +993,48 @@ class Game(GameNode):
         """
         time_control_header = self.headers.get("TimeControl", "")
         return parse_time_control(time_control_header)
+
+    def merge(self: GameT, other: Game) -> GameT:
+        """
+        Creates a new game by merging this game with *other*, a different
+        record of the same game (for example, a plain mainline and an
+        annotated version).
+
+        Both games must start from the same position, otherwise
+        :exc:`ValueError` is raised.
+
+        The mainline of the merged game is extended only while both games
+        agree on the next move. If both games continue with different moves,
+        the conflict is not resolved automatically: The mainline is frozen
+        at the last confirmed move, and both continuations are kept as
+        variations. If only one game continues, its continuation is
+        uncontradicted and stays on the mainline.
+
+        Variations are merged recursively by move. Lines that are unique to
+        one side are preserved, including lines that transpose into a
+        position that is reached by a different move order elsewhere.
+        Comments and NAGs of merged nodes are combined, dropping only exact
+        duplicates.
+
+        Headers are taken from this game, filled in from *other* where they
+        are missing or still placeholders.
+        """
+        first_board = self.board()
+        second_board = other.board()
+        if type(first_board).uci_variant != type(second_board).uci_variant or first_board.epd() != second_board.epd():
+            raise ValueError("cannot merge games with different starting positions")
+
+        placeholders = ["?", "????.??.??", "*"]
+        headers: Dict[str, str] = dict(self.headers.items())
+        for tagname, tagvalue in other.headers.items():
+            if tagname not in headers or (headers[tagname] in placeholders and tagvalue not in placeholders):
+                headers[tagname] = tagvalue
+
+        merged = type(self)(headers=headers)
+        merged.comments = _merge_comments(self.comments, other.comments)
+        merged.errors = self.errors + other.errors
+        _merge_position(merged, self, other)
+        return merged
 
     @classmethod
     def from_board(cls: Type[GameT], board: chess.Board) -> GameT:
