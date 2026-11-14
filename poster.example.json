@@ -1,0 +1,10 @@
+{
+  "date_begin": "2014-01",
+  "date_end": "2014-12",
+  "area": "NZ",
+  "credits": [
+    {"name": "Dynamo Squad", "role": "headliner"},
+    {"name": "Mystery Lights", "role": "support", "aka": "mystery"},
+    {"name": "The Mystery Lights", "role": "support", "aka": "mystery"}
+  ]
+}
