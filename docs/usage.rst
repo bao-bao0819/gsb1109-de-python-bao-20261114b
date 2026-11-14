@@ -84,6 +84,48 @@ with adding `includes` and you filter releases and release_groups::
    If you want to fetch all release groups you will have to
    `browse <browsing>`_.
 
+Band Lineups
+------------
+
+Band membership is stored as individual artist relationships.  The same person
+can have several relationships with one band (leaving and rejoining are two
+records), and the dates are frequently only precise to a year or month.
+
+``musicbrainzngs.timeline`` keeps every relationship separate.  Asking for a
+date returns confirmed members and candidates separately::
+
+  from musicbrainzngs import timeline
+
+  artist = musicbrainzngs.get_artist_by_id(artist_id, ["artist-rels"])
+  lineup = timeline.Lineup(artist)
+
+  confirmed, candidates = lineup.members_on("2014-10-10")
+  print("confirmed:", confirmed)
+  print("candidates:", candidates)
+
+A year-only date such as ``2011`` means "sometime during 2011".  A query in
+that year therefore produces a candidate, not a confirmed member.  A person
+with two relationships that touch or overlap stays two tenures; the gap
+between them is never filled in.
+
+Guest performers with the same name as a member stay separate, because they
+are keyed by MusicBrainz artist id::
+
+  members, member_candidates = lineup.on(date)
+  guests, guest_candidates = lineup.guests(date)
+
+New evidence can narrow one specific tenure.  The result reports the tenure,
+the original relationship and the before/after ranges::
+
+  evidence = timeline.Evidence(
+      "2015-09-01", kind="joined", target="<artist-id>",
+      source="interview-2015", evidence_id="ev-1")
+  result = lineup.apply_evidence(evidence)
+  print(result.describe())
+
+  # Later, recover exactly what that evidence changed:
+  print(lineup.evidence_effect("interview-2015"))
+
 Cover Art Data
 ^^^^^^^^^^^^^^
 

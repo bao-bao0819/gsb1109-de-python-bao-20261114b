@@ -57,6 +57,35 @@ The valid includes are listed for each function.
 .. autodata:: musicbrainzngs.musicbrainz.VALID_RELEASE_TYPES
 .. autodata:: musicbrainzngs.musicbrainz.VALID_RELEASE_STATUSES
 
+.. _lineup_api:
+
+Band Lineups
+------------
+
+MusicBrainz stores band membership as individual ``member of band``
+relationships.  The timeline helpers keep each relationship separate, treat
+partial dates as ranges, and classify a queried day as confirmed or
+candidate.  Guest performers are reported separately because they may share a
+display name with a formal member.
+
+.. autoclass:: musicbrainzngs.timeline.Lineup
+   :members: on, guests, members_on, guest_names, query, timeline,
+             tenures_for, apply_evidence, evidence_effect
+
+.. autoclass:: musicbrainzngs.timeline.Tenure
+   :members: certainty, covers, to_dict
+
+.. autoclass:: musicbrainzngs.timeline.Evidence
+   :members: to_dict
+
+.. autoclass:: musicbrainzngs.timeline.EvidenceResult
+   :members: describe
+
+.. autofunction:: musicbrainzngs.timeline.parse_date
+.. autofunction:: musicbrainzngs.timeline.date_precision
+.. autofunction:: musicbrainzngs.timeline.build_lineup
+.. autofunction:: musicbrainzngs.timeline.query_lineup
+
 .. _caa_api:
 
 Cover Art
