@@ -168,6 +168,44 @@ Currently supported schemas including:
 
 PRs are welcome to support more schemas.
 
+Rerun and pass-rate metrics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When a pipeline receives reports from more than one tester, the same test
+execution can be represented differently:
+
+- an xunit2 tester records failed reruns as interim results (``rerunFailure``,
+  ``rerunError``, ``flakyFailure``, ``flakyError``) inside one testcase;
+- another tester emits one testcase per attempt, with a rerun sequence number.
+
+``junitparser.metrics`` reconciles both flavors through an execution id and a
+zero-based rerun sequence number (looked up on the testcase or testsuite as
+attributes/properties, e.g. ``execution_id`` and ``run_index``). The same
+attempt reported by both testers is counted only once.
+
+.. code-block:: python
+
+    from junitparser.metrics import TestMetricsBuilder
+
+    builder = TestMetricsBuilder()
+    # execution_id/run_index may also be passed explicitly per report
+    builder.add_report("jenkins-xunit2.xml", source="jenkins")
+    builder.add_report("pytest-split-cases.xml", source="pytest")
+    report = builder.build()
+
+    report.final_pass_rate        # exact, even for legacy reports
+    report.first_pass_rate        # over tests whose first try is known
+    report.first_pass_rate_bounds # (lower, upper) including legacy tests
+    report.extra_attempts         # exact only when every history is complete
+    report.extra_attempts_minimum # lower bound otherwise
+    report.unknown_history_tests  # (execution_id, test_id) pairs to flag
+    report.summary()              # plain dict ready for a daily report
+
+Legacy reports that only carry a final result, with no rerun sequence
+information, are never counted as first-try passes. Their final outcomes stay
+exact, while the affected metrics are exposed as determinable ranges or lower
+bounds together with the offending ``(execution_id, test_id)`` pairs.
+
 Create XML with custom attributes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

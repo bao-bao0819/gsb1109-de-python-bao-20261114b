@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+### Added
+- `junitparser.metrics`: aggregate first-try pass rate, final pass rate and
+  extra attempt counts across xunit2 interim-result reports and split-case
+  reports. Attempts are reconciled by execution id and rerun sequence number,
+  so the same attempt reported by two testers is counted once. Legacy
+  final-only reports are never treated as first-try passes; affected metrics
+  are returned as determinable ranges/lower bounds with the affected test ids.
+
 ## [5.0.3] - 2026-08-31
 ### Fixed
 - Issue 177: Fix 177 different behavior of + and +=.
