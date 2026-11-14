@@ -34,12 +34,35 @@ Command Line Interface
     the frame-list-only option ``--frames``. Values exceeding Excel's limit
     of 32767 characters per cell are rejected instead of truncated.
 
+3. **canj1939ledger**:
+
+    reconciles J1939 recorder batches into a per-device operating-day
+    ledger.
+
+    Example: "*canj1939ledger* morning.json afternoon.json -o ledger.json"
+
+    Each input file is a JSON document describing one recorder's receive
+    window and its captured frames. Address-claimed frames (PGN 0x00EE00)
+    carry the 64 bit device NAME -- the stable identity used for the
+    ledger -- while every other frame is a measurement attributed by
+    aligning the frame's source address, the per-batch address claims and
+    each recorder's receive window. Batches may be listed in any order:
+    the merge follows the frame timestamps (the supportable event order),
+    never the file order, so late arriving batches are slotted in
+    correctly. Address contention is adjudicated by the J1939 claim
+    priority rules (the lower NAME wins the address); when overlapping
+    claim windows are insufficient to determine the owner of a
+    measurement, the measurement is reported as ambiguous together with
+    the candidate devices and the claim evidence instead of being
+    silently attributed. Measurements after a completed handover are
+    still attributed to the right device.
+
 
 General
 _______
 
 If you properly install canmatrix using *pip,* the setuptools create
-two executables for you: `canconvert` and `cancompare`. You can find these executables
+three executables for you: `canconvert`, `cancompare` and `canj1939ledger`. You can find these executables
 near to your `python(.exe)`
 
 If you aren't able to find the scripts, you can still run it as
@@ -48,6 +71,7 @@ If you aren't able to find the scripts, you can still run it as
 
 $ python -m canmatrix.cli.compare [args]
 $ python -m canmatrix.cli.convert [args]
+$ python -m canmatrix.cli.j1939_ledger [args]
 
 To show help message/usage call ::
 
