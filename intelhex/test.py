@@ -77,6 +77,15 @@ from intelhex.compat import (
     )
 from intelhex.__version__ import version_str
 
+# Row/column XOR checksum recovery tests live in a separate module but are
+# imported here so that `python setup.py test` runs them as part of the suite.
+from intelhex.test_recovery import (
+    TestLayout,
+    TestRecovery,
+    TestContradictions,
+    TestMultiPage,
+)
+
 __docformat__ = 'restructuredtext'
 
 ##

@@ -2,6 +2,15 @@
 IntelHex releases
 *****************
 
+Unreleased
+----------
+* New module ``intelhex.recovery``: reconstruct missing (erased) bytes on a
+  rectangular HEX page protected by row and column XOR checksums. A byte is
+  inferred only when it is identical across every checksum-consistent
+  completion; read values stay distinguished from inferred values, and
+  contradicted row/column checksums are reported and isolated so unrelated
+  fields on the same page are still exported.
+
 * Added support for ``in`` operator to check if address is in HEX file.
 
 2.3.0 (2020-10-20)

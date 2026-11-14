@@ -1,0 +1,77 @@
+Recovering missing bytes with row/column XOR checksums
+******************************************************
+
+Some devices (for example production metering pages) store a rectangular
+grid of bytes in a HEX file where every row ends with a byte equal to the
+XOR of the other bytes of that row, and every column ends with the XOR of
+the other bytes of that column.  The corner cell is the checksum of the
+checksum row and column.  When the image is read back some cells may be
+missing ("holes") because they were erased or never programmed.
+
+The ``intelhex.recovery`` module reconstructs every missing byte that the
+two sets of checksums determine *uniquely*.  A byte that can take more
+than one value while still satisfying every surviving checksum is left
+unknown rather than guessed, and reconstructed bytes are always reported
+separately from the bytes actually read.
+
+Defining a page
+===============
+
+A page is described by its base address, its width and height (both
+including the checksum column and row) and the fields placed on it::
+
+    >>> from intelhex import IntelHex
+    >>> from intelhex.recovery import PageLayout, FieldLayout, recover_page
+    >>> layout = PageLayout('metering', 0x1000, 4, 4, [
+    ...     FieldLayout('serial', 0x1000, 3),
+    ...     FieldLayout('counter', 0x1004, 3),
+    ...     FieldLayout('status', 0x1008, 3),
+    ... ])
+
+Fields may not overlap, escape the page or claim checksum cells.  When the
+checksum column/row are not the last column/row, pass their indices with
+the ``row_checksum_col`` and ``col_checksum_row`` keyword arguments.
+
+Running the recovery
+====================
+
+Holes are simply addresses absent from the ``IntelHex`` object.  Below
+the byte at ``0x1001`` was erased; every other cell (including the
+checksums) is present::
+
+    >>> ih = IntelHex({0x1000: 0x10, 0x1002: 0x30, 0x1003: 0x00,
+    ...                0x1004: 0x40, 0x1005: 0x50, 0x1006: 0x60, 0x1007: 0x70,
+    ...                0x1008: 0x70, 0x1009: 0x80, 0x100A: 0x90, 0x100B: 0x60,
+    ...                0x100C: 0x20, 0x100D: 0xF0, 0x100E: 0xC0, 0x100F: 0x10})
+    >>> report = recover_page(ih, layout)
+
+The report keeps the origin of every byte:
+
+* ``report.origins`` maps each known address to ``READ`` or ``INFERRED``;
+* ``report.recovered`` is an ``IntelHex`` with every read and inferred
+  byte;
+* ``report.field_results`` gives, per field, the read bytes, the uniquely
+  inferred bytes and any addresses that remain missing;
+* ``report.bad_rows`` and ``report.bad_columns`` list checksums that
+  contradict each other, and ``report.contradictions()`` formats them.
+
+A byte is inferred only when it is identical across *all* completions
+consistent with the checksums that are not contradicted::
+
+    >>> report.origin(0x1001)
+    'inferred'
+    >>> report.origin(0x1000)
+    'read'
+    >>> report.has_contradictions
+    False
+
+Handling contradictions
+=======================
+
+When a set of checksums is inconsistent, every row and column involved in
+the contradiction is reported and those equations are discarded before a
+second solve.  Fields that never touch a discarded row or column are still
+recovered normally on the same page; read bytes are never overwritten.
+Use ``apply_recovery`` to obtain a copy of the original image with only the
+inferred holes filled in, and ``recover_pages`` to process several
+independent pages in one call.
