@@ -14,6 +14,19 @@ from .TftpServer import TftpServer
 from .TftpClient import TftpClient
 from . import __name__ as pkg_name
 from . import TftpContexts, TftpPacketFactory, TftpPacketTypes, TftpStates
+from .TftpObservation import (
+    Observation,
+    TimeInterval,
+    BlockDelivery,
+    RateBounds,
+    TftpObservationAnalysis,
+    parse_observation_line,
+    parse_observations,
+    load_observations,
+    analyze_observations,
+    render_report,
+    analysis_to_json,
+)
 import sys
 
 try:

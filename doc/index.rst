@@ -54,6 +54,26 @@ The simplest tftp server::
 
 See the sample client and server for slightly more complex examples.
 
+Offline observation analysis
+----------------------------
+The :mod:`tftpy.TftpObservation` module analyzes a timestamped TFTP capture,
+for example from a device daily report, without needing a live session. It
+splits DAT traffic into unique payload, retransmit overhead and an
+undeterminable remainder, supports logs that only cover the middle of a
+transfer, brackets a missed first delivery between the predecessor block and
+the first observed arrival, and reports effective payload rate as bounds when
+the timing is uncertain::
+
+    import tftpy
+
+    observations = tftpy.load_observations('device-tftp.log')
+    analysis = tftpy.analyze_observations(observations)
+    print(tftpy.render_report(analysis))
+
+The ``bin/tftpy_observation.py`` script provides the same analysis from the
+command line, including a ``--json`` output mode.
+
+
 API Documentation
 =================
 
@@ -110,5 +130,11 @@ The `TftpContexts` Module
 The `TftpStates` Module
 ~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: tftpy.TftpStates
+   :members:
+   :show-inheritance:
+
+The `TftpObservation` Module
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: tftpy.TftpObservation
    :members:
    :show-inheritance:
