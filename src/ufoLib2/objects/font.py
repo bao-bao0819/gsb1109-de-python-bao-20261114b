@@ -11,7 +11,7 @@ from collections.abc import (
     MutableMapping,
     Sequence,
 )
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from attrs import define, field
 from fontTools.ufoLib import UFOFileStructure, UFOReader, UFOWriter
@@ -44,6 +44,9 @@ from ufoLib2.objects.misc import (
 )
 from ufoLib2.serde import serde
 from ufoLib2.typing import PATH_TYPES, HasIdentifier, PathLike, T
+
+if TYPE_CHECKING:
+    from ufoLib2.archive import Archive
 
 
 def _convert_LayerSet(value: LayerSet | Iterable[Layer]) -> LayerSet:
@@ -448,6 +451,34 @@ class Font:
             kwargs: The arguments passed to the Layer object constructor.
         """
         return self.layers.newLayer(name, **kwargs)
+
+    def archive(
+        self,
+        characters: Iterable[Any],
+        *,
+        layers: Iterable[str] | str | None = None,
+        substitutes: Mapping[Any, Any] | None = None,
+    ) -> Archive:
+        """Collect glyphs and their component closures for archiving.
+
+        Components are resolved within the layer of the glyph that contains
+        them.  A glyph name that exists only in another layer is not used as
+        an implicit fallback; such a miss is reported unless an explicit
+        substitute is supplied.
+
+        Args:
+            characters: Characters and glyph names to package.  See
+                :func:`ufoLib2.archive.build_archive`.
+            layers: Layer names to package.  Defaults to all layers.
+            substitutes: Optional mapping of missing glyphs to explicit
+                sources.  See :func:`ufoLib2.archive.build_archive`.
+
+        Returns:
+            An :class:`ufoLib2.archive.Archive` with one package per layer.
+        """
+        from ufoLib2.archive import build_archive
+
+        return build_archive(self, characters, layers=layers, substitutes=substitutes)
 
     def renameGlyph(self, name: str, newName: str, overwrite: bool = False) -> None:
         """Renames a :class:`.Glyph` object in the default layer.

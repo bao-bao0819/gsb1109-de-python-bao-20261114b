@@ -40,6 +40,38 @@ inserted elsewhere::
 
     font["glyphNameCopy"] = copy.deepcopy(font["glyphName"])
 
+Archiving a character list
+--------------------------
+
+:func:`ufoLib2.archive.build_archive` (also available as :meth:`.Font.archive`)
+collects the glyphs needed for a list of characters, one layer at a time. It
+follows the UFO component rule strictly: components are resolved in the layer
+that contains the composite glyph. A glyph with the same name in another layer
+is never used as an implicit fallback, so a miss in one layer is reported even
+when another layer happens to contain that glyph.
+
+Missing pieces can be filled only through an explicit ``substitutes`` mapping,
+either for one layer (``("layer", "glyph")``) or for every layer (``"glyph"``)::
+
+    from ufoLib2 import Character, GlyphSource
+
+    archive = font.archive(
+        [Character("A"), Character("Á")],
+        substitutes={"acute": GlyphSource("public.default", "acute")},
+    )
+    archive["public.special"]["acute"]
+
+Each packaged glyph entity is stored once per layer, no matter how many requests
+or component chains reach it. Every :class:`.ArchiveRequest` still keeps its
+own request chains, which :meth:`.LayerArchive.provenance` exposes for a given
+glyph name.
+
+A component that points back to a glyph above it in the same request is
+reported as a whole ring on :class:`.Cycle` (for example ``("A", "B", "C",
+"A")``), and only the requests that reach the ring are marked with a ``"cycle"``
+status. Other requests in the layer are still packaged normally and keep their
+own status.
+
 Defcon's API can't be matched exactly
 -------------------------------------
 

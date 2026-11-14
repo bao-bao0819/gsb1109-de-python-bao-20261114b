@@ -50,6 +50,47 @@ Layer
    :members:
    :undoc-members:
 
+Archive
+^^^^^^^
+
+.. autofunction:: ufoLib2.archive.build_archive
+
+.. autoclass:: ufoLib2.archive.Archive
+   :members:
+   :undoc-members:
+
+.. autoclass:: ufoLib2.archive.LayerArchive
+   :members:
+   :undoc-members:
+
+.. autoclass:: ufoLib2.archive.ArchiveRequest
+   :members:
+   :undoc-members:
+
+.. autoclass:: ufoLib2.archive.Cycle
+   :members:
+   :undoc-members:
+
+.. autoclass:: ufoLib2.archive.ArchiveIssue
+   :members:
+   :undoc-members:
+
+.. autoclass:: ufoLib2.archive.Substitution
+   :members:
+   :undoc-members:
+
+.. autoclass:: ufoLib2.archive.Character
+   :members:
+   :undoc-members:
+
+.. autoclass:: ufoLib2.archive.GlyphName
+   :members:
+   :undoc-members:
+
+.. autoclass:: ufoLib2.archive.GlyphSource
+   :members:
+   :undoc-members:
+
 Glyph
 ^^^^^
 
