@@ -203,6 +203,39 @@ nodes, without their names. For a guided walkthrough, see
 `examples/explore_ast.py <examples/explore_ast.py>`_; for recursive traversal,
 see the ``NodeVisitor`` example in `examples/func_defs.py <examples/func_defs.py>`_.
 
+Interprocedural reachability
+----------------------------
+
+For code with a single database-write function behind many thin wrappers,
+``pycparser.sampling_analysis`` interprets the AST and reports which
+concrete ``(channel, field, scale)`` combinations can reach that write point.
+Calls are inlined with per-call bindings, so arguments chosen by the same
+branch stay correlated; recursive and unknown callees truncate only the
+affected path::
+
+    from pycparser.sampling_analysis import (
+        Endpoint, EntryPoint, ReachabilityAnalyzer, prepare_source)
+    from pycparser import c_parser
+
+    source = prepare_source(open("pipeline.c").read())
+    ast = c_parser.CParser().parse(source, filename="pipeline.c")
+    analyzer = ReachabilityAnalyzer(ast, Endpoint("db_write"))
+    for result in analyzer.analyze([EntryPoint("sample_environment", (0, 1))]):
+        print(result.render())        # values + full call path with coordinates
+    for truncation in analyzer.truncations:
+        print(truncation.render())    # recursion/unknown/missing value, per path
+
+Each result exposes ``values`` (with the expression that produced each value),
+``path`` (one ``Frame`` per call site, from entry point to ``db_write``), and
+``write_coord``. ``as_dict()`` returns a JSON-safe representation. The
+``examples/sampling_reachability.py`` script applies this to a file from the
+command line and can emit text or JSON.
+
+The analyzer is deliberately bounded: loops are unrolled a fixed number of
+times, function pointers are not resolved, and values it cannot determine are
+never guessed. Every such cutoff is reported instead of silently dropping the
+whole program.
+
 There's also a `FAQ available here <https://github.com/eliben/pycparser/wiki/FAQ>`_.
 In any case, you can always drop me an `email <eliben@gmail.com>`_ for help.
 
