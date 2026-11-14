@@ -1,0 +1,41 @@
+Script ``hexshift.py``
+**********************
+This is a script to compare two hex files taking possible block moves
+into account.
+
+When a data block (e.g. a calibration table) is relocated to another
+address range between two versions of a firmware image, a plain diff
+reports the whole block as deleted and re-added. This utility lets the
+user declare movable regions of the old file together with a few flag
+byte patterns, and then confirms the shifts: a move is proven either by
+flag words whose old and new locations define the shift, or by a unique
+exact match of the whole region content (holes included). Repeated
+constant data, no matter how long, cannot prove a move by itself.
+
+The report lists confirmed shifts, the bytes that really changed after
+the shifts, and regions whose match is not unique. Applying the
+confirmed changes to the old file makes all addresses marked certain
+match the new file byte-for-byte, holes included; the tool verifies
+this and says so in the report.
+
+::
+
+    hexshift: shift-aware diff of 2 hex files.
+
+    Usage:
+        python hexshift.py [options] OLD_FILE NEW_FILE
+
+    Options:
+        -h, --help              this help message.
+        -v, --version           version info.
+        -r, --region START-END  movable region in OLD_FILE as hex addresses
+                                (END inclusive); may be given multiple times.
+        -f, --flag HEXBYTES     flag byte pattern (hex) proving a move when it
+                                matches at the shifted location; may be given
+                                multiple times.
+        -o, --output FILE       write OLD_FILE with confirmed changes applied
+                                to FILE (Intel HEX format).
+
+    A move of a region is confirmed when it is proven by flag words or by a
+    unique exact match of the whole region content (holes included). Repeated
+    constant data, no matter how long, cannot prove a move by itself.

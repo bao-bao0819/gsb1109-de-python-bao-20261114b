@@ -1623,6 +1623,222 @@ class TestDiffDumps(unittest.TestCase):
         self.assertEqual(shouldbe, result)
 
 
+class TestShiftDiff(unittest.TestCase):
+
+    def test_repeated_constant_detection(self):
+        self.assertTrue(intelhex._is_repeated_constant(b'\x5A' * 64))
+        self.assertTrue(intelhex._is_repeated_constant(b'\xDE\xAD' * 32))
+        self.assertTrue(intelhex._is_repeated_constant(b'\xAB' * 3))
+        self.assertFalse(intelhex._is_repeated_constant(b'\xDE\xAD\xBE'))
+        self.assertFalse(intelhex._is_repeated_constant(
+            bytes(bytearray(range(16)))))
+        self.assertFalse(intelhex._is_repeated_constant(b''))
+        self.assertFalse(intelhex._is_repeated_constant(b'\x00'))
+
+    def test_confirmed_shift_unique_content(self):
+        table = bytes(bytearray(range(0x20, 0x40)))
+        ih_old = IntelHex({0: 1, 1: 2})
+        ih_old.puts(0x1000, table)
+        ih_new = IntelHex({0: 1, 1: 2})
+        ih_new.puts(0x9000, table)
+        result = intelhex.shift_diff(ih_old, ih_new,
+                                     regions=[(0x1000, 0x101F)])
+        self.assertEqual([], result.ambiguous)
+        self.assertEqual([], result.not_found)
+        self.assertEqual(1, len(result.confirmed))
+        shift = result.confirmed[0]
+        self.assertEqual(0x1000, shift.start)
+        self.assertEqual(0x101F, shift.end)
+        self.assertEqual(0x8000, shift.offset)
+        self.assertEqual(0x9000, shift.new_start)
+        self.assertEqual(0x901F, shift.new_end)
+        self.assertEqual(32, shift.matched)
+        self.assertEqual(0, shift.changed)
+        self.assertEqual([], shift.anchors)
+        self.assertEqual([], result.residual)
+        self.assertEqual([], result.verify())
+
+    def test_confirmed_shift_with_flag_and_changed_bytes(self):
+        content = bytearray(range(0x20))
+        content[4:8] = b'\xDE\xAD\xBE\xEF'
+        new_content = bytearray(content)
+        new_content[0x10] ^= 0xFF
+        new_content[0x11] ^= 0xFF
+        ih_old = IntelHex()
+        ih_old.puts(0x1000, bytes(content))
+        ih_new = IntelHex()
+        ih_new.puts(0x2000, bytes(new_content))
+        # without flags the changed content cannot be located
+        result = intelhex.shift_diff(ih_old, ih_new,
+                                     regions=[(0x1000, 0x101F)])
+        self.assertEqual([], result.confirmed)
+        self.assertEqual([(0x1000, 0x101F)], result.not_found)
+        # flag word anchors the move
+        result = intelhex.shift_diff(ih_old, ih_new,
+                                     regions=[(0x1000, 0x101F)],
+                                     flags=[b'\xDE\xAD\xBE\xEF'])
+        self.assertEqual([], result.ambiguous)
+        self.assertEqual(1, len(result.confirmed))
+        shift = result.confirmed[0]
+        self.assertEqual(0x1000, shift.offset)
+        self.assertEqual([b'\xDE\xAD\xBE\xEF'], shift.anchors)
+        self.assertEqual(30, shift.matched)
+        self.assertEqual(2, shift.changed)
+        # the recalibrated bytes show up as residual changes
+        self.assertEqual(2, len(result.residual))
+        self.assertEqual(0x2010, result.residual[0].addr)
+        self.assertEqual(content[0x10], result.residual[0].old)
+        self.assertEqual(new_content[0x10], result.residual[0].new)
+        self.assertEqual(0x2011, result.residual[1].addr)
+        self.assertEqual([], result.verify())
+
+    def test_repeated_constant_cannot_prove_move(self):
+        ih_old = IntelHex()
+        ih_old.puts(0x1000, b'\x5A' * 256)
+        ih_new = IntelHex()
+        ih_new.puts(0x9000, b'\x5A' * 256)
+        result = intelhex.shift_diff(ih_old, ih_new,
+                                     regions=[(0x1000, 0x10FF)])
+        self.assertEqual([], result.confirmed)
+        self.assertEqual([], result.not_found)
+        self.assertEqual(1, len(result.ambiguous))
+        amb = result.ambiguous[0]
+        self.assertEqual([0x8000], amb.candidates)
+        self.assertTrue('repeated constant' in amb.reason)
+        # ambiguous zone is not certain
+        self.assertFalse(result.is_certain(0x1000))
+        self.assertFalse(result.is_certain(0x9000))
+        self.assertTrue(result.is_certain(0x0000))
+        self.assertEqual([], result.verify())
+
+    def test_repeated_constant_confirmed_by_flag(self):
+        ih_old = IntelHex()
+        ih_old.puts(0x0F00, b'CALIBVER')
+        ih_old.puts(0x1000, b'\x5A' * 256)
+        ih_new = IntelHex()
+        ih_new.puts(0x8F00, b'CALIBVER')
+        ih_new.puts(0x9000, b'\x5A' * 256)
+        result = intelhex.shift_diff(ih_old, ih_new,
+                                     regions=[(0x1000, 0x10FF)],
+                                     flags=[b'CALIBVER'])
+        self.assertEqual([], result.ambiguous)
+        self.assertEqual(1, len(result.confirmed))
+        shift = result.confirmed[0]
+        self.assertEqual(0x8000, shift.offset)
+        self.assertEqual([b'CALIBVER'], shift.anchors)
+        self.assertEqual(256, shift.matched)
+        self.assertEqual([], result.verify())
+
+    def test_ambiguous_multiple_locations(self):
+        table = bytes(bytearray(range(0x20, 0x40)))
+        ih_old = IntelHex()
+        ih_old.puts(0x1000, table)
+        ih_new = IntelHex()
+        ih_new.puts(0x9000, table)
+        ih_new.puts(0xA000, table)
+        result = intelhex.shift_diff(ih_old, ih_new,
+                                     regions=[(0x1000, 0x101F)])
+        self.assertEqual([], result.confirmed)
+        self.assertEqual(1, len(result.ambiguous))
+        amb = result.ambiguous[0]
+        self.assertEqual([0x8000, 0x9000], amb.candidates)
+        self.assertTrue('more than one location' in amb.reason)
+        self.assertEqual([], result.verify())
+
+    def test_ambiguous_flag_not_unique(self):
+        table = bytes(bytearray(range(0x20, 0x40)))
+        ih_old = IntelHex()
+        ih_old.puts(0x0100, b'\xDE\xAD')
+        ih_old.puts(0x1000, table)
+        ih_new = IntelHex()
+        ih_new.puts(0x8100, b'\xDE\xAD')
+        ih_new.puts(0x9100, b'\xDE\xAD')
+        ih_new.puts(0x9000, table)
+        ih_new.puts(0xA000, table)
+        result = intelhex.shift_diff(ih_old, ih_new,
+                                     regions=[(0x1000, 0x101F)],
+                                     flags=[b'\xDE\xAD'])
+        self.assertEqual([], result.confirmed)
+        self.assertEqual(1, len(result.ambiguous))
+        amb = result.ambiguous[0]
+        self.assertEqual([0x8000, 0x9000], amb.candidates)
+        self.assertTrue('flag words match more than one location'
+                        in amb.reason)
+
+    def test_not_found(self):
+        table = bytes(bytearray(range(0x20, 0x40)))
+        ih_old = IntelHex()
+        ih_old.puts(0x1000, table)
+        ih_new = IntelHex()
+        result = intelhex.shift_diff(ih_old, ih_new,
+                                     regions=[(0x1000, 0x101F)])
+        self.assertEqual([], result.confirmed)
+        self.assertEqual([(0x1000, 0x101F)], result.not_found)
+        # bytes of the vanished region are residual removals
+        self.assertEqual(32, len(result.residual))
+        for i, change in enumerate(result.residual):
+            self.assertEqual(0x1000 + i, change.addr)
+            self.assertEqual(table[i], change.old)
+            self.assertEqual(None, change.new)
+        self.assertEqual([], result.verify())
+
+    def test_holes_must_match(self):
+        ih_old = IntelHex()
+        ih_old.puts(0x1000, b'\x01\x02\x03\x04')
+        ih_old.puts(0x1008, b'\x05\x06\x07\x08')
+        # holes aligned: confirmed
+        ih_new = IntelHex()
+        ih_new.puts(0x9000, b'\x01\x02\x03\x04')
+        ih_new.puts(0x9008, b'\x05\x06\x07\x08')
+        result = intelhex.shift_diff(ih_old, ih_new,
+                                     regions=[(0x1000, 0x100B)])
+        self.assertEqual(1, len(result.confirmed))
+        self.assertEqual(0x8000, result.confirmed[0].offset)
+        self.assertEqual([], result.verify())
+        # hole filled in new file: not an exact match anymore
+        ih_new2 = IntelHex()
+        ih_new2.puts(0x9000, b'\x01\x02\x03\x04\xFF\xFF\xFF\xFF')
+        ih_new2.puts(0x9008, b'\x05\x06\x07\x08')
+        result = intelhex.shift_diff(ih_old, ih_new2,
+                                     regions=[(0x1000, 0x100B)])
+        self.assertEqual([], result.confirmed)
+        self.assertEqual([(0x1000, 0x100B)], result.not_found)
+
+    def test_empty_region_is_ambiguous(self):
+        ih_old = IntelHex({0: 1})
+        ih_new = IntelHex({0: 1})
+        result = intelhex.shift_diff(ih_old, ih_new,
+                                     regions=[(0x1000, 0x10FF)])
+        self.assertEqual([], result.confirmed)
+        self.assertEqual(1, len(result.ambiguous))
+        self.assertTrue('no data' in result.ambiguous[0].reason)
+
+    def test_apply_matches_new_at_certain_addresses(self):
+        content = bytearray(range(0x20))
+        content[4:8] = b'\xDE\xAD\xBE\xEF'
+        new_content = bytearray(content)
+        new_content[0x10] ^= 0xFF
+        ih_old = IntelHex({0: 0xAA, 0x5000: 0xBB})
+        ih_old.puts(0x1000, bytes(content))
+        ih_new = IntelHex({0: 0xAA, 0x5000: 0xCC})
+        ih_new.puts(0x2000, bytes(new_content))
+        result = intelhex.shift_diff(ih_old, ih_new,
+                                     regions=[(0x1000, 0x101F)],
+                                     flags=[b'\xDE\xAD\xBE\xEF'])
+        self.assertEqual(1, len(result.confirmed))
+        # residual holds the recalibrated byte and the unrelated change
+        self.assertEqual(2, len(result.residual))
+        patched = result.apply()
+        for addr in ih_new.addresses():
+            if result.is_certain(addr):
+                self.assertTrue(addr in patched)
+                self.assertEqual(ih_new[addr], patched[addr])
+        for addr in patched.addresses():
+            if result.is_certain(addr):
+                self.assertTrue(addr in ih_new)
+        self.assertEqual([], result.verify())
+
+
 class TestBuildRecords(TestIntelHexBase):
 
     def test__from_bytes(self):
@@ -1747,6 +1963,37 @@ class TestInSubprocess(unittest.TestCase):
 
     def test_sripts_hexmerge_version(self):
         self.versionChecker('%s intelhex/scripts/hexmerge.py --version')
+
+    def test_sripts_hexshift_version(self):
+        self.versionChecker('%s intelhex/scripts/hexshift.py --version')
+
+    def test_sripts_hexshift_compare(self):
+        table = bytes(bytearray(range(0x20, 0x40)))
+        ih_old = IntelHex()
+        ih_old.puts(0x1000, table)
+        ih_new = IntelHex()
+        ih_new.puts(0x9000, table)
+        fd1, fname1 = tempfile.mkstemp(suffix='.hex')
+        fd2, fname2 = tempfile.mkstemp(suffix='.hex')
+        try:
+            os.close(fd1)
+            os.close(fd2)
+            ih_old.tofile(fname1, format='hex')
+            ih_new.tofile(fname2, format='hex')
+            cmdline = ('%s -m intelhex.scripts.hexshift -r 1000-101F "%s" "%s"'
+                       % (sys.executable, fname1, fname2))
+            if sys.platform != 'win32':
+                cmdline = shlex.split(cmdline)
+            p = subprocess.Popen(cmdline, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE)
+            stdout, stderr = p.communicate()
+            output = stdout.decode('ascii', 'replace').replace('\r', '')
+            self.assertEqual(0, p.poll())
+            self.assertTrue('shift +0x8000' in output)
+            self.assertTrue('Verification OK' in output)
+        finally:
+            os.remove(fname1)
+            os.remove(fname2)
 
 
 class TestWriteHexFileByteCount(unittest.TestCase):

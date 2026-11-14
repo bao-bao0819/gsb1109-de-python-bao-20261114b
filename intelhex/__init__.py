@@ -1146,6 +1146,375 @@ def diff_dumps(ih1, ih2, tofile=None, name1="a", name2="b", n_context=3):
     tofile.write(output)
 
 
+def _is_repeated_constant(data):
+    """Check whether byte string consists of a shorter pattern repeated
+    at least twice (e.g. a table filled with a constant value).
+    Such data is not unique enough to prove a block move by itself.
+
+    @param  data    bytes-like object.
+    @return         True if data is a repetition of a shorter pattern.
+    """
+    n = len(data)
+    if n < 2:
+        return False
+    # KMP prefix function: smallest period of data is n - pi[-1]
+    pi = [0] * n
+    k = 0
+    for i in range_g(1, n):
+        while k > 0 and data[i] != data[k]:
+            k = pi[k-1]
+        if data[i] == data[k]:
+            k += 1
+        pi[i] = k
+    period = n - pi[-1]
+    return period <= n // 2
+
+
+def _find_all_occurrences(ih, sub, start=None, end=None):
+    """Return sorted list of absolute addresses of all occurrences of
+    byte pattern sub inside ih[start:end]. Occurrences cannot span
+    across holes in data.
+
+    @param  ih      IntelHex object to search in.
+    @param  sub     bytes-like pattern to find.
+    @param  start   start of section to search within (optional).
+    @param  end     end of section to search within, exclusive (optional).
+    """
+    positions = []
+    n = len(sub)
+    if n == 0:
+        return positions
+    for seg_start, seg_end in ih.segments():
+        lo = seg_start if start is None else max(seg_start, start)
+        hi = seg_end if end is None else min(seg_end, end)
+        if hi - lo < n:
+            continue
+        data = ih.gets(lo, hi - lo)
+        pos = data.find(sub)
+        while pos != -1:
+            positions.append(lo + pos)
+            pos = data.find(sub, pos + 1)
+    return positions
+
+
+def _region_content(ih, start, end):
+    """Extract content of address range [start, end] (inclusive).
+
+    @return     tuple (defined, holes): dict of offset->byte for occupied
+                addresses and list of offsets for holes.
+    """
+    defined = {}
+    holes = []
+    for addr in range_g(start, end + 1):
+        if addr in ih:
+            defined[addr - start] = ih[addr]
+        else:
+            holes.append(addr - start)
+    return defined, holes
+
+
+def _verify_exact_shift(ih_new, start, offset, defined, holes):
+    """Check that region content moved by offset matches ih_new exactly,
+    i.e. all defined bytes are equal at the shifted location and all
+    holes are holes there as well."""
+    if start + offset < 0:
+        return False
+    for o, b in dict_items_g(defined):
+        addr = start + o + offset
+        if addr not in ih_new or ih_new[addr] != b:
+            return False
+    for o in holes:
+        if start + o + offset in ih_new:
+            return False
+    return True
+
+
+def _find_exact_shifts(ih_new, start, defined, holes):
+    """Find all shift offsets for which region content (defined bytes and
+    holes) matches ih_new exactly at the shifted location."""
+    if not defined:
+        return []
+    # use the longest contiguous run of defined bytes as search anchor
+    offsets = sorted(defined)
+    run_start = run_end = offsets[0]
+    best_start = best_end = offsets[0]
+    for o in offsets[1:]:
+        if o == run_end + 1:
+            run_end = o
+        else:
+            if run_end - run_start > best_end - best_start:
+                best_start, best_end = run_start, run_end
+            run_start = run_end = o
+    if run_end - run_start > best_end - best_start:
+        best_start, best_end = run_start, run_end
+    anchor = bytes(bytearray(
+        defined[o] for o in range_g(best_start, best_end + 1)))
+    shifts = []
+    for pos in _find_all_occurrences(ih_new, anchor):
+        offset = pos - (start + best_start)
+        if _verify_exact_shift(ih_new, start, offset, defined, holes):
+            shifts.append(offset)
+    return shifts
+
+
+def _shift_stats(ih_new, start, offset, defined, holes):
+    """Count how region content compares to ih_new at shifted location.
+
+    @return     tuple (matched, changed, missing, added) of byte counts.
+    """
+    matched = changed = missing = added = 0
+    for o, b in dict_items_g(defined):
+        addr = start + o + offset
+        if addr in ih_new:
+            if ih_new[addr] == b:
+                matched += 1
+            else:
+                changed += 1
+        else:
+            missing += 1
+    for o in holes:
+        if start + o + offset in ih_new:
+            added += 1
+    return matched, changed, missing, added
+
+
+class RegionShift(object):
+    """Confirmed move of a region: address range [start, end] of the old
+    image was relocated by offset to the new image."""
+
+    def __init__(self, start, end, offset, anchors,
+                 matched, changed, missing, added):
+        self.start = start          # first address of region in old image
+        self.end = end              # last address of region in old image
+        self.offset = offset        # signed shift: new address = old + offset
+        self.anchors = anchors      # flag byte patterns proving the move
+        self.matched = matched      # defined bytes equal at new location
+        self.changed = changed      # defined bytes differing at new location
+        self.missing = missing      # defined bytes that are holes at new location
+        self.added = added          # old holes that hold data at new location
+
+    @property
+    def new_start(self):
+        """First address of the region in the new image."""
+        return self.start + self.offset
+
+    @property
+    def new_end(self):
+        """Last address of the region in the new image."""
+        return self.end + self.offset
+
+    def __repr__(self):
+        return ('RegionShift(start=0x%X, end=0x%X, offset=%+d)' %
+                (self.start, self.end, self.offset))
+
+
+class AmbiguousRegion(object):
+    """A movable region whose new location could not be confirmed
+    uniquely."""
+
+    def __init__(self, start, end, candidates, reason):
+        self.start = start          # first address of region in old image
+        self.end = end              # last address of region in old image
+        self.candidates = candidates    # list of possible shift offsets
+        self.reason = reason        # why the move could not be confirmed
+
+    def __repr__(self):
+        return ('AmbiguousRegion(start=0x%X, end=0x%X, candidates=%r)' %
+                (self.start, self.end, self.candidates))
+
+
+class ResidualChange(object):
+    """Single-address difference between the old image (with confirmed
+    shifts applied) and the new image. A value of None means the address
+    is a hole on that side. Addresses refer to the new image."""
+
+    def __init__(self, addr, old, new):
+        self.addr = addr
+        self.old = old              # byte value in shifted old image or None
+        self.new = new              # byte value in new image or None
+
+    def __repr__(self):
+        def fmt(b):
+            return '(hole)' if b is None else '0x%02X' % b
+        return ('ResidualChange(addr=0x%X, old=%s, new=%s)' %
+                (self.addr, fmt(self.old), fmt(self.new)))
+
+
+class ShiftDiffResult(object):
+    """Result of shift_diff(): confirmed block moves, ambiguous regions,
+    regions not found in the new image, and residual byte changes."""
+
+    def __init__(self, ih_old, ih_new):
+        self.ih_old = ih_old
+        self.ih_new = ih_new
+        self.confirmed = []     # list of RegionShift
+        self.ambiguous = []     # list of AmbiguousRegion
+        self.not_found = []     # list of (start, end) tuples
+        self.residual = []      # list of ResidualChange
+        self._uncertain = []    # list of (lo, hi) inclusive address ranges
+
+    def is_certain(self, addr):
+        """Check whether address is marked certain, i.e. the tool vouches
+        for its contents after the confirmed changes are applied.
+        Addresses covered by ambiguous regions (and their candidate
+        locations) are not certain."""
+        for lo, hi in self._uncertain:
+            if lo <= addr <= hi:
+                return False
+        return True
+
+    def apply(self):
+        """Apply confirmed shifts and residual changes to the old image.
+
+        @return     new IntelHex object: old image with confirmed changes.
+        """
+        ih = IntelHex(self.ih_old)
+        for shift in self.confirmed:
+            for addr in range_g(shift.start, shift.end + 1):
+                if addr in ih:
+                    del ih[addr]
+            defined, _holes = _region_content(self.ih_old,
+                                              shift.start, shift.end)
+            for o, b in dict_items_g(defined):
+                ih[shift.start + o + shift.offset] = b
+        for change in self.residual:
+            if change.new is None:
+                if change.addr in ih:
+                    del ih[change.addr]
+            else:
+                ih[change.addr] = change.new
+        return ih
+
+    def verify(self):
+        """Check that all certain addresses of the old image with the
+        confirmed changes applied match the new image byte-for-byte,
+        holes included.
+
+        @return     sorted list of violating addresses (empty if passed).
+        """
+        ih = self.apply()
+        violations = []
+        patched = {}
+        for addr in ih.addresses():
+            patched[addr] = True
+            if (self.is_certain(addr)
+                    and (addr not in self.ih_new
+                         or self.ih_new[addr] != ih[addr])):
+                violations.append(addr)
+        for addr in self.ih_new.addresses():
+            if addr not in patched and self.is_certain(addr):
+                violations.append(addr)
+        return sorted(violations)
+
+
+def shift_diff(ih_old, ih_new, regions=(), flags=()):
+    """Compare 2 IntelHex objects taking possible block moves into account.
+    For every user-specified movable region of the old image the new image
+    is searched for its new location. A move is confirmed when it is proven
+    either by user-supplied flag byte patterns (their old and new locations
+    define the shift, and the region content must still mostly match,
+    holes included) or by a unique exact match of the whole region content,
+    unless the content is a repeated constant: repeated constant data,
+    no matter how long, cannot prove a move by itself.
+
+    @param  ih_old      IntelHex object: old image.
+    @param  ih_new      IntelHex object: new image.
+    @param  regions     iterable of (start, end) inclusive address ranges
+                        in ih_old that may have been moved.
+    @param  flags       iterable of bytes-like anchor patterns ("flag
+                        words"); a flag found at p_old in ih_old and at
+                        p_new in ih_new suggests the shift p_new - p_old.
+    @return             ShiftDiffResult object.
+    """
+    flags = [bytes(bytearray(f)) for f in flags]
+    result = ShiftDiffResult(ih_old, ih_new)
+    # global shift offsets suggested by flag words: offset -> set of flags
+    flag_offsets = {}
+    for flag in flags:
+        old_positions = _find_all_occurrences(ih_old, flag)
+        if not old_positions:
+            continue
+        new_positions = _find_all_occurrences(ih_new, flag)
+        for p_old in old_positions:
+            for p_new in new_positions:
+                flag_offsets.setdefault(p_new - p_old, set()).add(flag)
+    for start, end in regions:
+        defined, holes = _region_content(ih_old, start, end)
+        if not defined:
+            result.ambiguous.append(AmbiguousRegion(
+                start, end, [], 'region contains no data'))
+            continue
+        content = bytes(bytearray(
+            defined[o] for o in sorted(defined)))
+        constant = _is_repeated_constant(content)
+        exact = _find_exact_shifts(ih_new, start, defined, holes)
+        # flag-suggested shifts where region content still mostly matches
+        anchored = {}
+        for offset, offset_flags in dict_items_g(flag_offsets):
+            if start + offset < 0:
+                continue
+            matched, changed, missing, added = _shift_stats(
+                ih_new, start, offset, defined, holes)
+            if matched > changed + missing + added:
+                anchored[offset] = (offset_flags,
+                                    (matched, changed, missing, added))
+        if len(anchored) == 1:
+            offset = sorted(anchored)[0]
+            offset_flags, stats = anchored[offset]
+            result.confirmed.append(RegionShift(
+                start, end, offset, sorted(offset_flags), *stats))
+        elif len(anchored) > 1:
+            result.ambiguous.append(AmbiguousRegion(
+                start, end, sorted(anchored),
+                'flag words match more than one location'))
+        elif not constant and len(exact) == 1:
+            offset = exact[0]
+            stats = _shift_stats(ih_new, start, offset, defined, holes)
+            result.confirmed.append(RegionShift(start, end, offset, [], *stats))
+        elif exact:
+            if constant:
+                reason = ('repeated constant data cannot prove '
+                          'a move by itself')
+            else:
+                reason = 'content matches more than one location'
+            result.ambiguous.append(AmbiguousRegion(start, end, exact, reason))
+        else:
+            result.not_found.append((start, end))
+    # addresses the tool cannot vouch for
+    for amb in result.ambiguous:
+        result._uncertain.append((amb.start, amb.end))
+        for offset in amb.candidates:
+            result._uncertain.append((amb.start + offset, amb.end + offset))
+    # residual differences between shifted old image and new image
+    shifted = IntelHex(ih_old)
+    for shift in result.confirmed:
+        for addr in range_g(shift.start, shift.end + 1):
+            if addr in shifted:
+                del shifted[addr]
+        defined, _holes = _region_content(ih_old, shift.start, shift.end)
+        for o, b in dict_items_g(defined):
+            shifted[shift.start + o + shift.offset] = b
+    all_addrs = {}
+    for addr in shifted.addresses():
+        all_addrs[addr] = True
+    for addr in ih_new.addresses():
+        all_addrs[addr] = True
+    for addr in sorted(all_addrs):
+        if not result.is_certain(addr):
+            continue    # leave ambiguous zones unresolved
+        in_shifted = addr in shifted
+        in_new = addr in ih_new
+        if in_shifted and in_new:
+            if shifted[addr] != ih_new[addr]:
+                result.residual.append(
+                    ResidualChange(addr, shifted[addr], ih_new[addr]))
+        elif in_shifted:
+            result.residual.append(ResidualChange(addr, shifted[addr], None))
+        else:
+            result.residual.append(ResidualChange(addr, None, ih_new[addr]))
+    return result
+
+
 class Record(object):
     """Helper methods to build valid ihex records."""
 

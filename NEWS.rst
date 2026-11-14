@@ -3,6 +3,10 @@ IntelHex releases
 *****************
 
 * Added support for ``in`` operator to check if address is in HEX file.
+* New ``shift_diff()`` function and ``hexshift.py`` script: shift-aware
+  comparison of 2 hex files that confirms relocated blocks (e.g. moved
+  calibration tables) via user-specified movable regions and flag byte
+  patterns, and reports the bytes that really changed after the moves.
 
 2.3.0 (2020-10-20)
 ------------------
