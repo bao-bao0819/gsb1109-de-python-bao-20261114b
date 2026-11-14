@@ -13,6 +13,7 @@ import unittest
 import io
 
 import chess
+import chess.book_report
 import chess.gaviota
 import chess.engine
 import chess.pgn
@@ -5004,6 +5005,186 @@ class CrazyhouseTestCase(unittest.TestCase):
         self.assertTrue(board.is_irreversible(board.parse_san("Rxh8")))
         self.assertFalse(board.is_irreversible(board.parse_san("Rf1")))
         self.assertFalse(board.is_irreversible(chess.Move.null()))
+
+
+class BookReportTestCase(unittest.TestCase):
+
+    @staticmethod
+    def _raw_move(move):
+        return move.to_square | (move.from_square << 6) | ((move.promotion - 1) << 12 if move.promotion else 0)
+
+    @staticmethod
+    def _line(game, sans):
+        board = game.board()
+        node = game
+        for san in sans:
+            node = node.add_main_variation(board.parse_san(san))
+            board = node.board()
+        return node
+
+    @staticmethod
+    def _book(path, positions):
+        """Writes a Polyglot book from [(board, [(move, weight), ...]), ...]."""
+        import struct
+        with open(path, "wb") as handle:
+            for board, entries in positions:
+                key = chess.polyglot.zobrist_hash(board)
+                for move, weight in entries:
+                    handle.write(struct.pack(">QHHI", key, BookReportTestCase._raw_move(move), weight, 0))
+
+    def test_mainline_only_and_stratification(self):
+        import chess.book_report as book_report
+
+        game = chess.pgn.Game({"Event": "Stratum A"})
+        e4 = self._line(game, ["e4"])
+        # The mainline continues with e5. The Sicilian is only a sideline and
+        # must not be counted as practical play.
+        e4.add_main_variation(e4.board().parse_san("e5"))
+        e4.add_variation(e4.board().parse_san("c5"))
+
+        with chess.polyglot.open_reader("data/polyglot/performance.bin") as book:
+            report = book_report.analyze_games([game], book, stratum_headers=("Event",))
+
+        start_key = chess.polyglot.zobrist_hash(chess.Board())
+        rows = [row for row in report.rows if row.position_key == start_key]
+        self.assertEqual([row.move_uci for row in rows], ["c2c4", "d2d4", "e2e4"])
+        observed = {row.move_uci: row.observed_votes for row in rows}
+        self.assertEqual(observed, {"c2c4": 0.0, "d2d4": 0.0, "e2e4": 1.0})
+        self.assertEqual({row.stratum for row in rows}, {"Stratum A"})
+        # The sideline move may still appear as an unplayed book entry, but
+        # must never receive an observation.
+        for row in report.rows:
+            if row.move_uci == "c7c5":
+                self.assertEqual(row.observed_votes, 0.0)
+
+    def test_game_vote_split_by_continuation(self):
+        import chess.book_report as book_report
+
+        # Return to the start position and continue differently. In game mode
+        # this is one vote for the position, split between Nf3 and e4. In
+        # opportunity mode it is two independent observations.
+        game = chess.pgn.Game({"Event": "A"})
+        self._line(game, ["Nf3", "Nf6", "Ng1", "Ng8", "e4"])
+
+        start = chess.Board()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "book.bin")
+            self._book(path, [(start, [(start.parse_san("Nf3"), 1), (start.parse_san("e4"), 1)])])
+            with chess.polyglot.open_reader(path) as book:
+                game_mode = book_report.analyze_games([game], book, count_mode="game")
+                opportunity = book_report.analyze_games([game], book, count_mode="opportunity")
+
+        start_key = chess.polyglot.zobrist_hash(start)
+
+        def by_move(report):
+            return {row.move_uci: row for row in report.rows if row.position_key == start_key}
+
+        game_rows = by_move(game_mode)
+        self.assertEqual(game_rows["g1f3"].observed_votes, 0.5)
+        self.assertEqual(game_rows["e2e4"].observed_votes, 0.5)
+        self.assertEqual(game_rows["g1f3"].observed_share, 0.5)
+        self.assertEqual(game_rows["e2e4"].observed_share, 0.5)
+        self.assertEqual(game_mode.positions, 4)
+        opportunity_rows = by_move(opportunity)
+        self.assertEqual(opportunity_rows["g1f3"].observed_votes, 1.0)
+        self.assertEqual(opportunity_rows["e2e4"].observed_votes, 1.0)
+        self.assertEqual(opportunity_rows["g1f3"].observed_share, 0.5)
+        self.assertEqual(opportunity_rows["e2e4"].observed_share, 0.5)
+        self.assertEqual(opportunity.positions, 4)
+
+    def test_transposition_merges_positions(self):
+        import chess.book_report as book_report
+
+        first = chess.pgn.Game({"Event": "A"})
+        self._line(first, ["Nf3", "d5", "g3", "Nf6", "Bg2"])
+        second = chess.pgn.Game({"Event": "A"})
+        self._line(second, ["g3", "d5", "Nf3", "Nf6", "Bg2"])
+
+        shared_board = first.end().board()
+        shared_board.pop()
+        shared_key = chess.polyglot.zobrist_hash(shared_board)
+        bg2 = shared_board.parse_san("Bg2")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "book.bin")
+            self._book(path, [(shared_board, [(bg2, 3)])])
+            with chess.polyglot.open_reader(path) as book:
+                report = book_report.analyze_games([first, second], book, stratum_headers=("Event",))
+
+        rows = [row for row in report.rows if row.position_key == shared_key]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].move_uci, bg2.uci())
+        self.assertEqual(rows[0].observed_votes, 2.0)
+        self.assertEqual(rows[0].observed_share, 1.0)
+        self.assertEqual(rows[0].book_share, 1.0)
+        self.assertAlmostEqual(rows[0].position_tv_distance, 0.0)
+
+    def test_absent_and_zero_weight_are_distinct(self):
+        import chess.book_report as book_report
+
+        start = chess.Board()
+        d4 = start.parse_san("d4")
+        c4 = start.parse_san("c4")
+
+        def analyze(moves, entries):
+            game = chess.pgn.Game({"Event": "A"})
+            self._line(game, moves)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = os.path.join(tmpdir, "book.bin")
+                self._book(path, [(start, entries)])
+                with chess.polyglot.open_reader(path) as book:
+                    return book_report.analyze_games([game], book, stratum_headers=("Event",))
+
+        # Played d4: the book has d4 with weight 10 and c4 with explicit 0.
+        report = analyze(["d4"], [(d4, 10), (c4, 0)])
+        rows = {row.move_uci: row for row in report.rows}
+        self.assertEqual(rows["d2d4"].book_status, "present")
+        self.assertEqual(rows["d2d4"].book_weight, 10)
+        self.assertEqual(rows["d2d4"].book_share, 1.0)
+        self.assertEqual(rows["c2c4"].book_status, "zero_weight")
+        self.assertEqual(rows["c2c4"].book_weight, 0)
+        self.assertEqual(rows["c2c4"].book_share, 0.0)
+        # A legal move with no entry at all is not emitted unless requested.
+        self.assertNotIn("e2e4", rows)
+
+        # Same zero-weight entry, but now the move is played. It stays a
+        # zero-weight book entry, not an absent one.
+        played_zero = analyze(["c4"], [(d4, 10), (c4, 0)])
+        zero_row = next(row for row in played_zero.rows if row.move_uci == "c2c4")
+        self.assertEqual(zero_row.book_status, "zero_weight")
+        self.assertEqual(zero_row.book_weight, 0)
+        self.assertEqual(zero_row.observed_votes, 1.0)
+
+        # A played move that has no entry is reported as absent with null
+        # book data and an empty CSV cell.
+        played_absent = analyze(["c4"], [(d4, 10)])
+        absent_row = next(row for row in played_absent.rows if row.move_uci == "c2c4")
+        self.assertEqual(absent_row.book_status, "absent")
+        self.assertIsNone(absent_row.book_weight)
+        self.assertIsNone(absent_row.book_share)
+
+        output = io.StringIO()
+        report.to_csv(output)
+        lines = output.getvalue().splitlines()
+        header = lines[0].split(",")
+        zero_cells = next(line for line in lines if ",zero_weight," in line).split(",")
+        self.assertEqual(zero_cells[header.index("book_weight")], "0")
+        self.assertEqual(zero_cells[header.index("book_status")], "zero_weight")
+
+        output = io.StringIO()
+        played_absent.to_csv(output)
+        lines = output.getvalue().splitlines()
+        absent_cells = next(line for line in lines if ",absent," in line).split(",")
+        self.assertEqual(absent_cells[header.index("book_weight")], "")
+        self.assertEqual(absent_cells[header.index("book_share")], "")
+
+        output = io.StringIO()
+        played_absent.to_json(output)
+        import json
+        payload = json.loads(output.getvalue())
+        absent_json = next(row for row in payload["rows"] if row["book_status"] == "absent")
+        self.assertIsNone(absent_json["book_weight"])
+        self.assertIsNone(absent_json["book_share"])
 
 
 class GiveawayTestCase(unittest.TestCase):
