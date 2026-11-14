@@ -78,6 +78,13 @@ Point
    :members:
    :undoc-members:
 
+Geometric comparison
+^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: ufoLib2.objects.geometry
+   :members:
+   :undoc-members:
+
 Anchor
 ^^^^^^
 
