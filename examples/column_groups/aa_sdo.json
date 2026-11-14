@@ -1,0 +1,248 @@
+{
+  "header_bytes": 16,
+  "width_limit": 32,
+  "fields": [
+    {
+      "frame": "SDO_download",
+      "signal": "sdo_down_CMD",
+      "bytes": 1
+    },
+    {
+      "frame": "SDO_download",
+      "signal": "sdo_down_IDX",
+      "bytes": 2
+    },
+    {
+      "frame": "SDO_download",
+      "signal": "sdo_down_SUBIDX",
+      "bytes": 1
+    },
+    {
+      "frame": "SDO_download",
+      "signal": "data8",
+      "bytes": 1
+    },
+    {
+      "frame": "SDO_download",
+      "signal": "data16",
+      "bytes": 2
+    },
+    {
+      "frame": "SDO_download",
+      "signal": "data24",
+      "bytes": 3
+    },
+    {
+      "frame": "SDO_download",
+      "signal": "data320",
+      "bytes": 4
+    },
+    {
+      "frame": "SDO_download",
+      "signal": "data321",
+      "bytes": 4
+    },
+    {
+      "frame": "SDO_upload",
+      "signal": "sdo_state",
+      "bytes": 1
+    },
+    {
+      "frame": "SDO_upload",
+      "signal": "sdo_uo_IDX",
+      "bytes": 2
+    },
+    {
+      "frame": "SDO_upload",
+      "signal": "sdo_up_SUBIDX",
+      "bytes": 1
+    },
+    {
+      "frame": "SDO_upload",
+      "signal": "error_code",
+      "bytes": 4
+    },
+    {
+      "frame": "SDO_upload",
+      "signal": "data8",
+      "bytes": 1
+    },
+    {
+      "frame": "SDO_upload",
+      "signal": "data16",
+      "bytes": 2
+    },
+    {
+      "frame": "SDO_upload",
+      "signal": "data24",
+      "bytes": 3
+    }
+  ],
+  "rows": [
+    {
+      "frame": "SDO_download",
+      "present": [
+        "sdo_down_CMD",
+        "sdo_down_IDX",
+        "sdo_down_SUBIDX",
+        "data8"
+      ]
+    },
+    {
+      "frame": "SDO_download",
+      "present": [
+        "sdo_down_CMD",
+        "sdo_down_IDX",
+        "sdo_down_SUBIDX",
+        "data16"
+      ]
+    },
+    {
+      "frame": "SDO_download",
+      "present": [
+        "sdo_down_CMD",
+        "sdo_down_IDX",
+        "sdo_down_SUBIDX",
+        "data24"
+      ]
+    },
+    {
+      "frame": "SDO_download",
+      "present": [
+        "sdo_down_CMD",
+        "sdo_down_IDX",
+        "sdo_down_SUBIDX",
+        "data320"
+      ]
+    },
+    {
+      "frame": "SDO_download",
+      "present": [
+        "sdo_down_CMD",
+        "sdo_down_IDX",
+        "sdo_down_SUBIDX",
+        "data321"
+      ]
+    },
+    {
+      "frame": "SDO_upload",
+      "present": [
+        "sdo_state",
+        "sdo_uo_IDX",
+        "sdo_up_SUBIDX",
+        "error_code"
+      ]
+    },
+    {
+      "frame": "SDO_upload",
+      "present": [
+        "sdo_state",
+        "sdo_uo_IDX",
+        "sdo_up_SUBIDX",
+        "data8"
+      ]
+    },
+    {
+      "frame": "SDO_upload",
+      "present": [
+        "sdo_state",
+        "sdo_uo_IDX",
+        "sdo_up_SUBIDX",
+        "data16"
+      ]
+    },
+    {
+      "frame": "SDO_upload",
+      "present": [
+        "sdo_state",
+        "sdo_uo_IDX",
+        "sdo_up_SUBIDX",
+        "data24"
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "name": "down_header",
+      "frequency": 5000,
+      "fields": [
+        [
+          "SDO_download",
+          "sdo_down_CMD"
+        ],
+        [
+          "SDO_download",
+          "sdo_down_IDX"
+        ]
+      ]
+    },
+    {
+      "name": "down_data8",
+      "frequency": 2000,
+      "fields": [
+        [
+          "SDO_download",
+          "data8"
+        ]
+      ]
+    },
+    {
+      "name": "down_data32",
+      "frequency": 1500,
+      "fields": [
+        [
+          "SDO_download",
+          "data320"
+        ]
+      ]
+    },
+    {
+      "name": "down_wide",
+      "frequency": 300,
+      "fields": [
+        [
+          "SDO_download",
+          "data8"
+        ],
+        [
+          "SDO_download",
+          "data16"
+        ]
+      ]
+    },
+    {
+      "name": "up_header",
+      "frequency": 4000,
+      "fields": [
+        [
+          "SDO_upload",
+          "sdo_state"
+        ],
+        [
+          "SDO_upload",
+          "sdo_uo_IDX"
+        ]
+      ]
+    },
+    {
+      "name": "up_error",
+      "frequency": 800,
+      "fields": [
+        [
+          "SDO_upload",
+          "error_code"
+        ]
+      ]
+    },
+    {
+      "name": "up_data24",
+      "frequency": 1200,
+      "fields": [
+        [
+          "SDO_upload",
+          "data24"
+        ]
+      ]
+    }
+  ]
+}
