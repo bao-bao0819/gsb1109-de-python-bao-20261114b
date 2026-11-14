@@ -2,6 +2,12 @@
 IntelHex releases
 *****************
 
+* Added ``intelhex.recover`` (and ``hexrecover.py``) to recover data after a
+  lost extended address record. It enumerates possible page segments, applies
+  absolute-address calibration witnesses, reports per-line address
+  possibilities and witness conflicts, and archives only bytes common to all
+  legal interpretations.
+
 * Added support for ``in`` operator to check if address is in HEX file.
 
 2.3.0 (2020-10-20)

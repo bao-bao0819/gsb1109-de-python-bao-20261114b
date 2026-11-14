@@ -1831,6 +1831,153 @@ class TestWriteHexFileByteCount(unittest.TestCase):
         self.assertEqual(ih.tobinstr(), ih2.tobinstr(),
                          "Written hex file does not equal with original")
 
+class TestRecoverMissingExtendedAddress(TestIntelHexBase):
+    """Recovering a HEX stream with one lost extended address record."""
+
+    def lines(self, *records):
+        return '\n'.join(list(records) + [intelhex.Record.eof()]) + '\n'
+
+    def test_all_pages_share_address_archive_every_byte(self):
+        from intelhex.recover import recover_hex
+        text = self.lines(
+            intelhex.Record.data(0x00, [0xAA, 0xBB]),
+            intelhex.Record.extended_linear_address(0x2000),
+            intelhex.Record.data(0x00, [0x11]),
+            )
+        result = recover_hex(text, page_segments=[0x0800],
+                             witnesses=[(0x08000000, 0xAA)])
+        self.assertFalse(result.has_conflict)
+        self.assertEqual([0x0800], [p.segment for p in result.feasible_pages])
+        self.assertEqual([(0x08000000, 0x08000002)],
+                         list(result.data_lines[0].possible_ranges))
+        self.assertEqual({0x08000000: 0xAA,
+                          0x08000001: 0xBB,
+                          0x20000000: 0x11,
+                          }, result.archive.todict())
+        self.assertEqual(1, result.counts['after_switch'])
+
+    def test_ambiguous_pages_archive_only_common_bytes(self):
+        from intelhex.recover import recover_hex
+        text = self.lines(
+            intelhex.Record.data(0x00, [0xAA, 0xBB, 0xCC]),
+            intelhex.Record.extended_linear_address(0x2000),
+            intelhex.Record.data(0x00, [0x11, 0x22]),
+            )
+        result = recover_hex(text, page_segments=[0x0800, 0x0900])
+        self.assertEqual(2, len(result.feasible_pages))
+        self.assertEqual([], list(result.data_lines[0].archived_ranges))
+        self.assertEqual({0x20000000: 0x11, 0x20000001: 0x22},
+                         result.archive.todict())
+        self.assertEqual((0x08000000, 0x08000003),
+                         result.data_lines[0].possible_ranges[0])
+        self.assertEqual((0x09000000, 0x09000003),
+                         result.data_lines[0].possible_ranges[1])
+
+    def test_witness_eliminates_a_page(self):
+        from intelhex.recover import recover_hex
+        text = self.lines(
+            intelhex.Record.data(0x00, [0xAA, 0xBB]),
+            intelhex.Record.data(0x08, [0xCC]),
+            intelhex.Record.extended_linear_address(0x2000),
+            )
+        result = recover_hex(
+            text, page_segments=[0x0800, 0x1000],
+            witnesses=[(0x08000000, 0xAA), (0x10000008, 0xDD)])
+        self.assertEqual([0x0800], [p.segment for p in result.feasible_pages])
+        self.assertEqual([0x1000], [p.segment for p, _w, _r
+                                     in result.rejected_pages])
+        self.assertEqual(2, result.data_lines[0].archived_bytes)
+
+    def test_conflicting_witnesses_name_the_lines(self):
+        from intelhex.recover import (
+            recover_hex, Witness, WitnessConflictError)
+        text = self.lines(
+            intelhex.Record.data(0x00, [0xAA, 0xBB]),
+            intelhex.Record.data(0x08, [0xCC]),
+            )
+        witnesses = [Witness(0x08000000, line=1, label='w1'),
+                     Witness(0x10000000, line=2, label='w2')]
+        result = recover_hex(
+            text, page_segments=[0x0800, 0x1000],
+            witnesses=witnesses)
+        self.assertTrue(result.has_conflict)
+        self.assertEqual([], list(result.feasible_pages))
+        self.assertEqual(['w2'], [w.label for w in result.conflict_witnesses])
+        self.assertRaises(WitnessConflictError, recover_hex,
+                          text, [0x0800, 0x1000], strict=True,
+                          witnesses=witnesses)
+
+    def test_unmatched_witness_is_reported_not_silently_ignored(self):
+        from intelhex.recover import recover_hex
+        text = self.lines(intelhex.Record.data(0x00, [0xAA]))
+        result = recover_hex(text, page_segments=[0x0800],
+                             witnesses=[(0x09000000, 0xAA)])
+        self.assertFalse(result.has_conflict)
+        self.assertEqual(1, len(result.unmatched_witnesses))
+
+    def test_switch_content_survives_conflict(self):
+        from intelhex.recover import recover_hex
+        text = self.lines(
+            intelhex.Record.data(0x00, [0xAA, 0xBB]),
+            intelhex.Record.extended_linear_address(0x2000),
+            intelhex.Record.data(0x00, [0x11, 0x22]),
+            )
+        from intelhex.recover import Witness
+        result = recover_hex(
+            text, page_segments=[0x0800, 0x1000],
+            witnesses=[Witness(0x08000008, line=1, label='w1')])
+        self.assertTrue(result.has_conflict)
+        self.assertEqual({0x20000000: 0x11, 0x20000001: 0x22},
+                         result.archive.todict())
+        self.assertEqual([], [r for r in result.data_lines if r.line == 3])
+
+    def test_line_witness_pins_a_record(self):
+        from intelhex.recover import recover_hex
+        text = self.lines(
+            intelhex.Record.data(0x00, [0xAA]),
+            intelhex.Record.data(0x08, [0xBB]),
+            )
+        result = recover_hex(
+            text, page_segments=[0x0800, 0x1000],
+            witnesses=[{'address': 0x08000008, 'line': 2}])
+        self.assertEqual([0x0800], [p.segment for p in result.feasible_pages])
+
+    def test_segment_record_recovery(self):
+        from intelhex.recover import recover_hex
+        text = self.lines(
+            intelhex.Record.data(0x00, [0xAA, 0xBB]),
+            intelhex.Record.extended_segment_address(0x1234),
+            intelhex.Record.data(0x00, [0x11]),
+            )
+        result = recover_hex(text, page_segments=[0x1000, 0x2000],
+                             record_type=2)
+        self.assertEqual([0x10000, 0x20000],
+                         [p.base for p in result.feasible_pages])
+        self.assertEqual({0x12340: 0x11},
+                         dict((k, v) for k, v in result.archive.todict().items()
+                              if k != 'start_addr'))
+
+    def test_bad_checksum_still_rejected(self):
+        from intelhex.recover import recover_hex
+        text = ':0100000000FE\n'
+        self.assertRaises(RecordChecksumError, recover_hex, text, [0x0800])
+
+    def test_conflict_error_message(self):
+        from intelhex.recover import recover_hex, WitnessConflictError
+        text = self.lines(intelhex.Record.data(0x00, [0xAA]))
+        from intelhex.recover import Witness
+        try:
+            recover_hex(text, [0x0800, 0x1000], strict=True,
+                        witnesses=[Witness(0x08000000, line=1),
+                                   Witness(0x10000000, line=1)])
+        except WitnessConflictError:
+            exc = sys.exc_info()[1]
+            self.assertIn('0x8000000', str(exc))
+            self.assertIn('0x10000000', str(exc))
+        else:
+            self.fail('WitnessConflictError not raised')
+
+
 ##
 # MAIN
 if __name__ == '__main__':

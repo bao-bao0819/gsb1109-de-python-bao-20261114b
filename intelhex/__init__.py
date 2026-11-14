@@ -930,6 +930,26 @@ class IntelHex(object):
         n += sys.getsizeof(self._offset)
         return n
 
+    def recover(self, page_segments, witnesses=(), **options):
+        '''Recover a HEX stream with a lost extended address record.
+
+        The object must still describe the damaged stream, i.e. it should be
+        loaded with the data records *before* the missing extended address
+        record.  The method serializes it and delegates to
+        :func:`intelhex.recover.recover_hex`, so the original object is not
+        modified.
+
+        @param  page_segments   possible payloads of the lost record.
+        @param  witnesses       absolute-address calibration witnesses.
+        @return                 :class:`intelhex.recover.RecoveryResult`.
+        '''
+        from intelhex.recover import recover_hex
+        from intelhex.compat import StringIO
+        buf = StringIO()
+        self.write_hex_file(buf)
+        buf.seek(0)
+        return recover_hex(buf, page_segments, witnesses=witnesses, **options)
+
 #/IntelHex
 
 

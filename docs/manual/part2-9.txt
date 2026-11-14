@@ -1,0 +1,50 @@
+Recovering a lost extended address record
+*****************************************
+Old capture hardware occasionally loses one line of an exported HEX file. If
+the lost line is an extended address record, every following data record can
+still have a correct checksum while its upper address bits are unknown. Plain
+``IntelHex`` cannot load that stream because it has no page for the data.
+
+The ``intelhex.recover`` module enumerates every legal interpretation instead:
+
+    >>> from intelhex.recover import recover_hex
+    >>> result = recover_hex('damaged.hex',
+    ...                      page_segments=[0x0800, 0x0900],
+    ...                      witnesses=[(0x08000000, 0xAA)])
+    >>> [(r.line, r.possible_ranges) for r in result.data_lines]
+    [(2, ((0x08000000, 0x08000004), (0x09000000, 0x09000004)))]
+
+``page_segments`` are the possible payloads of the missing record. For a lost
+extended linear address record (type ``04``) a payload is the upper 16-bit
+linear address, so each candidate covers 64 KiB. For a lost extended segment
+address record (type ``02``) consecutive payloads differ by 16 bytes but each
+record still addresses up to 64 KiB. Pass ``record_type=2`` in that case, and
+use ``page_bases=[...]`` if you already know byte base addresses. A single
+candidate can also be passed as ``page_segment=...`` with
+``page_segments=[...]`` accepting several at once.
+
+Calibration witnesses pin absolute addresses. Each one is either a byte
+witness ``(address, value)`` or a line witness
+``{'address': address, 'line': source_line}``; line witnesses assert that the
+data record on that source line falls at that address. A page must agree with
+every witness whose address lies inside its window. Pages that disagree are
+rejected with the failing witnesses.
+
+If no candidate page survives, ``result.has_conflict`` is true and
+``result.conflict_witnesses`` names the witnesses that together leave no
+feasible page. ``result.conflict_core`` is the minimal such subset. Passing
+``strict=True`` turns the conflict into a ``WitnessConflictError``.
+
+Only bytes that have the same address and value under every surviving
+interpretation are added to ``result.archive``. Content after the next
+explicit extended address switch is unambiguous and is always archived, even
+during a witness conflict:
+
+    >>> result.archive.write_hex_file('recovered.hex')
+    >>> for start, end in result.archive.segments():
+    ...     print('0x%X-0x%X' % (start, end-1))
+
+``result.possible_ranges`` per data line covers the surviving pages.
+``result.candidate_ranges`` also includes rejected pages, which is useful for
+diagnostics. ``result.to_dict()`` returns a JSON-safe report. The same API is
+available as ``IntelHex.recover`` and as the ``hexrecover.py`` script.
