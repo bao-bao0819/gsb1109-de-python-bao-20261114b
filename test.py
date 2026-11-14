@@ -3037,6 +3037,286 @@ class PgnTestCase(unittest.TestCase):
             game = chess.pgn.read_game(pgn)
             self.assertEqual(game, None)
 
+    def test_board_photo(self):
+        photo = chess.pgn.BoardPhoto({"e4": "P", "e5": None, "g1": "N", "d8": "q", "a1": "."})
+        self.assertEqual(len(photo), 5)
+        self.assertEqual(photo[chess.E4], chess.Piece(chess.PAWN, chess.WHITE))
+        self.assertEqual(photo["e5"], None)
+        self.assertEqual(photo[chess.D8], chess.Piece(chess.QUEEN, chess.BLACK))
+        self.assertEqual(list(photo), [
+            (chess.A1, None),
+            (chess.G1, chess.Piece(chess.KNIGHT, chess.WHITE)),
+            (chess.E4, chess.Piece(chess.PAWN, chess.WHITE)),
+            (chess.E5, None),
+            (chess.D8, chess.Piece(chess.QUEEN, chess.BLACK)),
+        ])
+
+        with self.assertRaises(ValueError):
+            chess.pgn.BoardPhoto({"z9": "P"})
+        with self.assertRaises(ValueError):
+            chess.pgn.BoardPhoto({"e4": "X"})
+        with self.assertRaises(ValueError):
+            chess.pgn.BoardPhoto({"e9": "P"})
+
+    def test_index_photos_variation_narrowing(self):
+        pgn = io.StringIO("1. e4 e5 (1... c5 2. Nf3) 2. Nf3 Nc6 (2... d6) 3. Bb5 *")
+        game = chess.pgn.read_game(pgn)
+
+        photos = [
+            chess.pgn.BoardPhoto({"e4": "P"}),
+            chess.pgn.BoardPhoto({"c5": "p"}),
+        ]
+
+        index = chess.pgn.index_photos(game, photos)
+        self.assertTrue(index.complete)
+        self.assertEqual(len(index), 2)
+
+        # 1. e4, 1... e5 and 1... c5, plus descendants while Black's c-pawn
+        # is still on c5, are locally compatible with the first photo.
+        self.assertGreater(len(index[0].local_candidates), 3)
+
+        # Knowing that c5 holds a black pawn removes the 1...e5 mainline.
+        first_paths = {candidate.uci_path() for candidate in index[0].candidates}
+        self.assertIn(("e2e4",), first_paths)
+        self.assertIn(("e2e4", "c7c5"), first_paths)
+        self.assertIn(("e2e4", "c7c5", "g1f3"), first_paths)
+        self.assertNotIn(("e2e4", "e7e5"), first_paths)
+        self.assertNotIn((), first_paths)
+
+        # The removed nodes are reported as narrowed by the sequence.
+        excluded_paths = {candidate.uci_path() for candidate in index[0].path_excluded}
+        self.assertIn(("e2e4", "e7e5"), excluded_paths)
+        self.assertTrue(all(candidate.uci_path() not in first_paths for candidate in index[0].path_excluded))
+
+        paths = list(index.consistent_paths())
+        self.assertTrue(paths)
+        for path in paths:
+            for earlier, later in zip(path, path[1:]):
+                node = later.node
+                while node is not None and node is not earlier.node:
+                    node = node.parent
+                self.assertIs(node, earlier.node)
+
+    def test_index_photos_skips_moves(self):
+        pgn = io.StringIO("1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 *")
+        game = chess.pgn.read_game(pgn)
+
+        photos = [
+            chess.pgn.BoardPhoto({"e4": "P"}),
+            chess.pgn.BoardPhoto({"a6": "p"}),
+        ]
+
+        index = chess.pgn.index_photos(game, photos)
+        self.assertTrue(index.complete)
+        self.assertEqual([candidate.uci_path() for candidate in index[0].candidates], [
+            ("e2e4",),
+            ("e2e4", "e7e5"),
+            ("e2e4", "e7e5", "g1f3"),
+            ("e2e4", "e7e5", "g1f3", "b8c6"),
+            ("e2e4", "e7e5", "g1f3", "b8c6", "f1b5"),
+            ("e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6"),
+        ])
+        self.assertEqual(index[1].candidates[0].uci_path(), ("e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6"))
+
+        # Limiting the gap between photos excludes the earliest positions.
+        limited = chess.pgn.index_photos(game, photos, max_ply_gap=3)
+        self.assertEqual([candidate.uci_path() for candidate in limited[0].candidates], [
+            ("e2e4", "e7e5", "g1f3"),
+            ("e2e4", "e7e5", "g1f3", "b8c6"),
+            ("e2e4", "e7e5", "g1f3", "b8c6", "f1b5"),
+            ("e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6"),
+        ])
+        for path in limited.consistent_paths():
+            self.assertLessEqual(path[1].ply - path[0].ply, 3)
+
+        with self.assertRaises(ValueError):
+            chess.pgn.index_photos(game, photos, max_ply_gap=0)
+
+    def test_index_photos_keeps_transpositions(self):
+        pgn = io.StringIO(
+            "1. e4 e5 2. Nf3 Nc6 3. Bc4 (3. Nc3 Nf6 4. Bc4 Bc5 5. d3) "
+            "3... Bc5 4. d3 Nf6 5. Nc3 *")
+        game = chess.pgn.read_game(pgn)
+
+        photo = chess.pgn.BoardPhoto({
+            "c4": "B", "c5": "b", "d3": "P",
+            "c3": "N", "f6": "n", "e4": "P", "e5": "p",
+        })
+
+        index = chess.pgn.index_photos(game, [photo])
+        self.assertEqual(len(index[0].local_candidates), 2)
+        self.assertEqual(len(index[0].candidates), 2)
+
+        # The two candidates look identical but were reached by different
+        # legal move orders. Both paths are retained separately.
+        first, second = index[0].candidates
+        self.assertEqual(first.board_fen, second.board_fen)
+        self.assertEqual(first.visual_key, second.visual_key)
+        self.assertNotEqual(first.uci_path(), second.uci_path())
+        self.assertEqual(first.uci_path(), (
+            "e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "f8c5", "d2d3", "g8f6", "b1c3"))
+        self.assertEqual(second.uci_path(), (
+            "e2e4", "e7e5", "g1f3", "b8c6", "b1c3", "g8f6", "f1c4", "f8c5", "d2d3"))
+
+        transpositions = index[0].transpositions()
+        self.assertEqual(len(transpositions), 1)
+        self.assertEqual(len(next(iter(transpositions.values()))), 2)
+
+    def test_index_photos_evidence(self):
+        pgn = io.StringIO("1. e4 e5 (1... c5) 2. Nf3 *")
+        game = chess.pgn.read_game(pgn)
+
+        photo = chess.pgn.BoardPhoto({"e4": "P", "c5": None})
+        index = chess.pgn.index_photos(game, [photo], path_consistent=False)
+        self.assertTrue(index.complete)
+
+        evidence = {item.square_name: item for item in index[0].evidence}
+        self.assertEqual(evidence["e4"].expected_symbol, "P")
+        self.assertEqual(evidence["e4"].conflicting, 1)
+
+        # Only the node after 1...c5 disagrees with "c5 is empty"; all other
+        # nodes agree with both visible squares and survive.
+        self.assertEqual(evidence["c5"].expected_symbol, ".")
+        self.assertEqual(evidence["c5"].solely_conflicting, 1)
+        self.assertEqual(len(evidence["c5"].examples), 1)
+        conflict = evidence["c5"].examples[0]
+        self.assertEqual(conflict.square, chess.C5)
+        self.assertEqual(conflict.actual_symbol, "p")
+        self.assertEqual(conflict.node.uci(), "c7c5")
+        self.assertTrue(all(candidate.uci_path() != ("e2e4", "c7c5") for candidate in index[0].candidates))
+
+        report = index.report()
+        self.assertIn("Photo 0:", report)
+        self.assertIn("c5=.", report)
+        self.assertIn("solely rejects 1", report)
+        self.assertIn("has p", report)
+
+    def test_index_photos_empty_and_impossible(self):
+        game = chess.pgn.read_game(io.StringIO("1. e4 *"))
+
+        empty = chess.pgn.index_photos(game, [])
+        self.assertEqual(len(empty), 0)
+        self.assertTrue(empty.complete)
+        self.assertEqual(list(empty.consistent_paths()), [()])
+
+        impossible = chess.pgn.index_photos(game, [chess.pgn.BoardPhoto({"d4": "P"})])
+        self.assertFalse(impossible.complete)
+        self.assertEqual(impossible[0].candidates, ())
+        self.assertEqual(list(impossible.consistent_paths()), [])
+
+        # A position visible twice on the same line is not collapsed: both
+        # nodes stay separate candidates even though they look identical.
+        repeat = chess.pgn.read_game(io.StringIO("1. Nf3 Nf6 2. Ng1 Ng8 *"))
+        index = chess.pgn.index_photos(repeat, [chess.pgn.BoardPhoto({"g1": "N"})])
+        self.assertEqual(len(index[0].candidates), 3)
+        self.assertEqual(len(index[0].transpositions()), 1)
+        group = next(iter(index[0].transpositions().values()))
+        self.assertEqual(len(group), 2)
+        self.assertEqual(group[0].board_fen, group[1].board_fen)
+        self.assertNotEqual(group[0].uci_path(), group[1].uci_path())
+
+    def test_index_photos_fen_start_ply(self):
+        game = chess.pgn.Game()
+        game.setup("4k3/8/8/8/8/8/8/4K3 b - - 7 6")
+        game.add_variation(chess.Move.from_uci("e8e7"))
+        game.add_variation(chess.Move.from_uci("e1e2"))
+
+        index = chess.pgn.index_photos(game, [chess.pgn.BoardPhoto({"e7": "k"})])
+        self.assertEqual(len(index[0].candidates), 1)
+        self.assertEqual(index[0].candidates[0].ply, 12)
+
+    def test_index_photos_transposition_narrowing(self):
+        pgn = io.StringIO(
+            "1. e4 e5 2. Nf3 Nc6 3. Bc4 (3. Nc3 Nf6 4. Bc4 Bc5 5. d3) "
+            "3... Bc5 4. d3 Nf6 5. Nc3 O-O 6. O-O d6 *")
+        game = chess.pgn.read_game(pgn)
+
+        # Both move orders reach the same position after 5.Nc3.
+        first_photo = chess.pgn.BoardPhoto({
+            "c4": "B", "c5": "b", "d3": "P",
+            "c3": "N", "f6": "n", "e4": "P", "e5": "p",
+        })
+        second_photo = chess.pgn.BoardPhoto({"d6": "p"})
+
+        before = chess.pgn.index_photos(game, [first_photo])
+        self.assertEqual(len(before[0].local_candidates), 5)
+        self.assertEqual(len(before[0].transpositions()), 1)
+        transposed = next(iter(before[0].transpositions().values()))
+        self.assertEqual(len(transposed), 2)
+
+        after = chess.pgn.index_photos(game, [first_photo, second_photo])
+        self.assertTrue(after.complete)
+
+        # 5...d6 exists only in the 3.Bc4 move order, so the transposed
+        # candidate from 3.Nc3 is removed from the earlier photo as well.
+        # Later positions on the surviving branch remain possible.
+        self.assertEqual([candidate.uci_path() for candidate in after[0].candidates], [
+            ("e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "f8c5", "d2d3", "g8f6", "b1c3"),
+            ("e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "f8c5", "d2d3", "g8f6", "b1c3", "e8g8"),
+            ("e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "f8c5", "d2d3", "g8f6", "b1c3", "e8g8", "e1g1"),
+            ("e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "f8c5", "d2d3", "g8f6", "b1c3", "e8g8", "e1g1", "d7d6"),
+        ])
+        self.assertEqual([candidate.uci_path() for candidate in after[0].path_excluded], [
+            ("e2e4", "e7e5", "g1f3", "b8c6", "b1c3", "g8f6", "f1c4", "f8c5", "d2d3"),
+        ])
+        self.assertEqual(after[0].transpositions(), {})
+
+    def test_index_photos_archive_scenario(self):
+        pgn = io.StringIO(textwrap.dedent("""\
+            [Event "Archive"]
+            [Result "*"]
+
+            1. e4 e5 (1... c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6)
+            2. Nf3 Nc6 (2... d6 3. d4 exd4 4. Nxd4 Nf6)
+            3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 *
+            """))
+        game = chess.pgn.read_game(pgn)
+
+        photos = [
+            chess.pgn.BoardPhoto({"e4": "P", "d2": "P", "c7": "p"}),
+            chess.pgn.BoardPhoto({"c5": "p", "d6": "p", "d7": None}),
+            chess.pgn.BoardPhoto({"d4": "N", "c5": None, "d6": "p", "f6": "n"}),
+        ]
+
+        index = chess.pgn.index_photos(game, photos)
+        self.assertTrue(index.complete)
+        self.assertEqual(len(index), 3)
+
+        # The first photo alone is compatible with both 1...e5 and 1...c5.
+        self.assertGreater(len(index[0].local_candidates), 1)
+        self.assertIn(("e2e4", "e7e5"), {candidate.uci_path() for candidate in index[0].local_candidates})
+
+        # The later photos can only be on the Sicilian branch. That also
+        # narrows the first photo to the position immediately after 1.e4.
+        self.assertEqual([candidate.uci_path() for candidate in index[0].candidates], [("e2e4",)])
+        self.assertIn(("e2e4", "e7e5"), {candidate.uci_path() for candidate in index[0].path_excluded})
+
+        for match in index[1:]:
+            self.assertTrue(all(
+                candidate.uci_path()[:2] == ("e2e4", "c7c5")
+                for candidate in match.candidates
+            ))
+
+        # Photo 2 shows the recaptured knight on d4 and the pawn still on
+        # d6, so only the Sicilian branch reaches it.
+        self.assertEqual([candidate.uci_path() for candidate in index[2].candidates], [
+            ("e2e4", "c7c5", "g1f3", "d7d6", "d2d4", "c5d4", "f3d4", "g8f6"),
+        ])
+
+        paths = list(index.consistent_paths())
+        self.assertEqual(len(paths), 2)
+        self.assertTrue(all(path[0].uci_path() == ("e2e4",) for path in paths))
+
+        report = index.report()
+        self.assertIn("Photo 0:", report)
+        self.assertIn("Photo 1:", report)
+        self.assertIn("Photo 2:", report)
+        self.assertIn("sequence narrowed", report)
+        self.assertIn("c5=p", report)
+        self.assertIn("c7=p", report)
+        self.assertIn("d2=P", report)
+        self.assertIn("d4=N", report)
+
 
 @unittest.skipIf(sys.platform == "win32" and (3, 8, 0) <= sys.version_info < (3, 8, 1), "https://bugs.python.org/issue34679")
 class EngineTestCase(unittest.TestCase):

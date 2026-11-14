@@ -69,6 +69,70 @@ Visitors are an advanced concept for game tree traversal.
 .. autoclass:: chess.pgn.BaseVisitor
     :members:
 
+Indexing sparse board photos
+----------------------------
+
+A :class:`~chess.pgn.BoardPhoto` records only the squares that are actually
+legible in a photo of a board. Omitted squares are unknown, so the same photo
+can match many positions.
+
+.. autoclass:: chess.pgn.BoardPhoto
+    :members:
+
+:func:`~chess.pgn.index_photos` indexes photos in shooting order. By default
+each photo is required to lie on one variation path, so a sequence of photos
+can skip moves but cannot jump between branches. The result is narrowed from
+both sides: a candidate for an early photo only survives if a later photo is
+still reachable from it.
+
+Candidates are individual nodes of the game tree, never positions. If the same
+position can be reached by multiple move orders, all of those paths are
+retained and can be inspected separately with
+:meth:`~chess.pgn.PhotoMatch.transpositions`. No candidate is merged or dropped
+just because its position looks identical.
+
+Every :class:`~chess.pgn.PhotoMatch` also carries
+:class:`~chess.pgn.PhotoSquareEvidence` for each visible square, stating how
+many nodes it agrees with, how many it rejects, and how many nodes it rejects
+on its own. :meth:`~chess.pgn.PhotoIndex.report` renders this as a per-photo
+text report.
+
+>>> import io
+>>> import chess
+>>> import chess.pgn
+>>>
+>>> game = chess.pgn.read_game(io.StringIO("1. e4 e5 (1... c5 2. Nf3) 2. Nf3 Nc6 *"))
+>>> photos = [
+...     chess.pgn.BoardPhoto({"e4": "P"}),
+...     chess.pgn.BoardPhoto({"c5": "p"}),
+... ]
+>>> index = chess.pgn.index_photos(game, photos)
+>>> index.complete
+True
+>>> print(index.report())  # doctest: +ELLIPSIS
+Photo 0: ... candidate(s), ... locally compatible
+  e4=P: agrees with ..., rejects ...
+  sequence narrowed: ... locally compatible node(s) removed (...)
+Photo 1: ... candidate(s), ... locally compatible
+  c5=p: agrees with ..., rejects ...
+
+.. autofunction:: chess.pgn.index_photos
+
+.. autoclass:: chess.pgn.PhotoIndex
+    :members:
+
+.. autoclass:: chess.pgn.PhotoMatch
+    :members:
+
+.. autoclass:: chess.pgn.PhotoCandidate
+    :members: uci_path, visual_key
+
+.. autoclass:: chess.pgn.PhotoSquareEvidence
+    :members: square_name, expected_symbol
+
+.. autoclass:: chess.pgn.PhotoConflict
+    :members: square_name, expected_symbol, actual_symbol
+
 The following visitors are readily available.
 
 .. autoclass:: chess.pgn.GameBuilder

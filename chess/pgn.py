@@ -12,7 +12,10 @@ import chess
 import chess.engine
 import chess.svg
 
-from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Literal, Mapping, MutableMapping, Set, TextIO, Tuple, Type, TypeVar, Optional, Union
+from typing import (
+    Any, Callable, Dict, Generic, Iterable, Iterator, List, Literal, Mapping,
+    MutableMapping, Optional, Sequence, Set, TextIO, Tuple, Type, TypeVar, Union,
+)
 from chess import Color, Square
 
 if typing.TYPE_CHECKING:
@@ -1098,6 +1101,591 @@ class Mainline(Generic[MainlineMapT]):
 
     def __repr__(self) -> str:
         return f"<Mainline at {id(self):#x} ({self.accept(StringExporter(columns=None, comments=False))})>"
+
+
+@dataclasses.dataclass(frozen=True, init=False)
+class BoardPhoto:
+    """
+    A sparse transcription of a board position, for example from a photo where
+    only a few squares are legible.
+
+    Only explicitly mentioned squares are constrained. Omitted squares are
+    unknown. A square mapped to ``None`` (or ``"."``) is known to be empty.
+    Piece values may be :class:`chess.Piece` objects or piece symbols like
+    ``"N"`` (white knight) and ``"q"`` (black queen).
+
+    >>> import chess
+    >>> import chess.pgn
+    >>>
+    >>> photo = chess.pgn.BoardPhoto({"e4": "P", "e5": None, "g1": "N"})
+    >>> photo[chess.E4]
+    Piece.from_symbol('P')
+    >>> photo[chess.E5] is None
+    True
+    >>> len(photo)
+    3
+    """
+
+    observations: Tuple[Tuple[chess.Square, Optional[chess.Piece]], ...]
+    """Sorted ``(square, piece)`` pairs. ``piece`` is ``None`` if the square is known to be empty."""
+
+    def __init__(
+            self,
+            observations: Union[
+                Mapping[Union[int, str], Union[str, chess.Piece, None]],
+                Iterable[Tuple[Union[int, str], Union[str, chess.Piece, None]]],
+            ]) -> None:
+        if hasattr(observations, "items"):
+            items = typing.cast(Mapping[Union[int, str], Union[str, chess.Piece, None]], observations).items()
+        else:
+            items = observations
+
+        normalized: Dict[chess.Square, Optional[chess.Piece]] = {}
+
+        for key, value in items:
+            try:
+                square = chess.parse_square(key) if isinstance(key, str) else int(key)
+            except (ValueError, TypeError) as error:
+                raise ValueError(f"invalid square: {key!r}") from error
+
+            if not 0 <= square < 64:
+                raise ValueError(f"invalid square: {key!r}")
+
+            if square in normalized:
+                raise ValueError(f"duplicate square in photo: {chess.square_name(square)}")
+
+            normalized[square] = _parse_photo_piece(value, square)
+
+        object.__setattr__(self, "observations", tuple(sorted(normalized.items())))
+
+    @classmethod
+    def from_symbols(
+            cls,
+            observations: Union[
+                Mapping[Union[int, str], Union[str, chess.Piece, None]],
+                Iterable[Tuple[Union[int, str], Union[str, chess.Piece, None]]],
+            ]) -> BoardPhoto:
+        """Creates a photo from square names and piece symbols or ``"."`` for empty squares."""
+        return cls(observations)
+
+    def __len__(self) -> int:
+        return len(self.observations)
+
+    def __iter__(self) -> Iterator[Tuple[chess.Square, Optional[chess.Piece]]]:
+        return iter(self.observations)
+
+    def __contains__(self, square: object) -> bool:
+        return any(known == square for known, _ in self.observations)
+
+    def __getitem__(self, square: Union[int, str]) -> Optional[chess.Piece]:
+        square = chess.parse_square(square) if isinstance(square, str) else square
+        for known, piece in self.observations:
+            if known == square:
+                return piece
+        raise KeyError(square)
+
+    def squares(self) -> Dict[chess.Square, Optional[chess.Piece]]:
+        """Returns the known squares as a dictionary."""
+        return dict(self.observations)
+
+    def __repr__(self) -> str:
+        return "{}({})".format(type(self).__name__, ", ".join(
+            "{}={}".format(chess.square_name(square), "." if piece is None else piece.symbol())
+            for square, piece in self.observations))
+
+
+def _parse_photo_piece(value: Union[str, chess.Piece, None], square: chess.Square) -> Optional[chess.Piece]:
+    if value is None:
+        return None
+    if isinstance(value, chess.Piece):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(f"invalid piece at {chess.square_name(square)}: {value!r}")
+
+    symbol = value.strip()
+    if symbol in (".", "", "-", "empty"):
+        return None
+    if len(symbol) != 1 or symbol not in "PNBRQKpnbrqk":
+        raise ValueError(f"invalid piece symbol at {chess.square_name(square)}: {value!r}")
+    return chess.Piece.from_symbol(symbol)
+
+
+@dataclasses.dataclass(frozen=True)
+class PhotoConflict:
+    """A node rejected because a known square contains something else."""
+
+    node: GameNode
+    square: chess.Square
+    expected: Optional[chess.Piece]
+    actual: Optional[chess.Piece]
+
+    @property
+    def square_name(self) -> str:
+        return chess.square_name(self.square)
+
+    @property
+    def expected_symbol(self) -> str:
+        return "." if self.expected is None else self.expected.symbol()
+
+    @property
+    def actual_symbol(self) -> str:
+        return "." if self.actual is None else self.actual.symbol()
+
+    def __repr__(self) -> str:
+        return "<{} at {:#x} {} expected {}, got {} at {}>".format(
+            type(self).__name__, id(self), self.square_name, self.expected_symbol,
+            self.actual_symbol, _node_label(self.node))
+
+
+@dataclasses.dataclass(frozen=True)
+class PhotoSquareEvidence:
+    """
+    How one visible square discriminates between nodes.
+
+    ``matching`` counts all nodes where the square agrees with the photo and
+    ``conflicting`` counts all nodes where it does not. ``solely_conflicting``
+    counts nodes that agree with every other visible square, so that this
+    square alone is responsible for rejecting them. ``examples`` contains up to
+    a few such nodes.
+
+    Within the returned candidates, the square supports only those nodes that
+    match it. The difference between the two counts, together with
+    ``solely_conflicting``, shows whether the square adds information beyond
+    the others.
+    """
+
+    square: chess.Square
+    expected: Optional[chess.Piece]
+    matching: int
+    conflicting: int
+    solely_conflicting: int
+    examples: Tuple[PhotoConflict, ...] = ()
+
+    @property
+    def square_name(self) -> str:
+        return chess.square_name(self.square)
+
+    @property
+    def expected_symbol(self) -> str:
+        return "." if self.expected is None else self.expected.symbol()
+
+    def __repr__(self) -> str:
+        return "<{} {}={} matching={} conflicting={} solely={}>".format(
+            type(self).__name__, self.square_name, self.expected_symbol,
+            self.matching, self.conflicting, self.solely_conflicting)
+
+
+@dataclasses.dataclass(frozen=True)
+class PhotoCandidate:
+    """A game node compatible with a photo."""
+
+    node: GameNode
+    ply: int
+    board_fen: str
+    fen: str
+    matched_squares: Tuple[chess.Square, ...]
+
+    @property
+    def visual_key(self) -> str:
+        """
+        What the board looks like, regardless of how it was reached: piece
+        placement only, ignoring side to move, castling rights, en passant,
+        and move counters.
+        """
+        return self.board_fen
+
+    def uci_path(self) -> Tuple[str, ...]:
+        """Moves from the root of the game to this node."""
+        path = []
+        node = self.node
+        while node.parent is not None:
+            path.append(node.uci())
+            node = node.parent
+        return tuple(reversed(path))
+
+    def __repr__(self) -> str:
+        return "<{} at {:#x} ply={} board={}>".format(
+            type(self).__name__, id(self), self.ply, self.board_fen)
+
+
+@dataclasses.dataclass(frozen=True)
+class PhotoMatch:
+    """
+    Result for one photo.
+
+    ``local_candidates`` are all nodes compatible with the visible squares in
+    this photo alone. ``candidates`` are those that additionally can be part of
+    one path-consistent assignment for the whole sequence. ``path_excluded``
+    are the locally compatible nodes removed by the sequence constraint.
+    """
+
+    photo: BoardPhoto
+    local_candidates: Tuple[PhotoCandidate, ...]
+    candidates: Tuple[PhotoCandidate, ...]
+    path_excluded: Tuple[PhotoCandidate, ...]
+    evidence: Tuple[PhotoSquareEvidence, ...]
+
+    @property
+    def complete(self) -> bool:
+        return bool(self.candidates)
+
+    def transpositions(self) -> Dict[str, Tuple[PhotoCandidate, ...]]:
+        """
+        Groups candidates with the same visual position but different game
+        paths. Groups with more than one path are returned. Candidates are
+        never merged or discarded based on position alone.
+        """
+        groups: Dict[str, List[PhotoCandidate]] = {}
+        for candidate in self.candidates:
+            groups.setdefault(candidate.visual_key, []).append(candidate)
+        return {
+            key: tuple(group)
+            for key, group in groups.items()
+            if len(group) > 1
+        }
+
+    def __repr__(self) -> str:
+        return "<{} at {:#x} local={} candidates={} path_excluded={}>".format(
+            type(self).__name__, id(self), len(self.local_candidates),
+            len(self.candidates), len(self.path_excluded))
+
+
+@dataclasses.dataclass(frozen=True)
+class PhotoIndex:
+    """The result of indexing a sequence of photos into a game tree."""
+
+    game: Game
+    matches: Tuple[PhotoMatch, ...]
+    path_consistent: bool = True
+    max_ply_gap: Optional[int] = None
+
+    @property
+    def complete(self) -> bool:
+        """Whether every photo has at least one candidate."""
+        return all(match.complete for match in self.matches)
+
+    def consistent_paths(self) -> Iterator[Tuple[PhotoCandidate, ...]]:
+        """
+        Iterates over assignments of one candidate per photo such that all
+        candidates lie on a single variation path, in shooting order. Respects
+        the same ply gap limit as :func:`index_photos`.
+
+        If the index was built with ``path_consistent=False``, all combinations
+        of candidates are returned instead.
+        """
+        if not self.matches:
+            yield ()
+            return
+
+        if not self.path_consistent:
+            yield from itertools.product(*(match.candidates for match in self.matches))
+            return
+
+        def visit(index: int, path: List[PhotoCandidate]) -> Iterator[Tuple[PhotoCandidate, ...]]:
+            if index == len(self.matches):
+                yield tuple(path)
+                return
+
+            for candidate in self.matches[index].candidates:
+                if path and not any(
+                        ancestor is path[-1].node
+                        for ancestor in _ancestor_nodes(candidate.node, self.max_ply_gap)):
+                    continue
+                path.append(candidate)
+                yield from visit(index + 1, path)
+                path.pop()
+
+        yield from visit(0, [])
+
+    def __len__(self) -> int:
+        return len(self.matches)
+
+    def __iter__(self) -> Iterator[PhotoMatch]:
+        return iter(self.matches)
+
+    def __getitem__(self, index: int) -> PhotoMatch:
+        return self.matches[index]
+
+    def report(self) -> str:
+        """
+        Returns a human readable per-photo report, naming the visible pieces
+        that support or reject candidates.
+
+        >>> import chess
+        >>> import chess.pgn
+        >>>
+        >>> game = chess.pgn.Game.from_board(chess.Board())
+        >>> print(chess.pgn.index_photos(game, [chess.pgn.BoardPhoto({"e2": "P"})]).report())
+        Photo 0: 1 candidate(s), 1 locally compatible
+          e2=P: agrees with 1 node(s), rejects 0; solely rejects 0
+        """
+        lines = []
+
+        for index, match in enumerate(self.matches):
+            lines.append("Photo {}: {} candidate(s), {} locally compatible".format(
+                index, len(match.candidates), len(match.local_candidates)))
+
+            for evidence in match.evidence:
+                line = "  {}={}: agrees with {} node(s), rejects {}; solely rejects {}".format(
+                    evidence.square_name, evidence.expected_symbol,
+                    evidence.matching, evidence.conflicting, evidence.solely_conflicting)
+
+                if evidence.examples:
+                    line += " ({})".format(", ".join(
+                        "{} has {}".format(_node_label(conflict.node), conflict.actual_symbol)
+                        for conflict in evidence.examples))
+
+                lines.append(line)
+
+            if match.path_excluded:
+                examples = ", ".join(
+                    _node_label(candidate.node) for candidate in match.path_excluded[:3])
+                if len(match.path_excluded) > 3:
+                    examples += ", ..."
+                lines.append("  sequence narrowed: {} locally compatible node(s) removed ({})".format(
+                    len(match.path_excluded), examples))
+
+        if not self.matches:
+            lines.append("No photos.")
+
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return "<{} at {:#x} photos={} complete={}>".format(
+            type(self).__name__, id(self), len(self.matches), self.complete)
+
+
+def _node_label(node: GameNode) -> str:
+    """A compact label for reports, or ``start`` for the root."""
+    if node.parent is None:
+        return "start"
+    try:
+        return "ply {} {}".format(node.ply(), node.san())
+    except (ValueError, KeyError):
+        return "ply {}".format(node.ply())
+
+
+def _walk_game_nodes(
+        game: Game,
+        observations: Sequence[Sequence[Tuple[chess.Square, Optional[chess.Piece]]]],
+        max_conflict_examples: int) -> _PhotoScan:
+    """
+    Traverses the game tree once in pre-order and evaluates every photo
+    against the live board at each node.
+    """
+    scan = _PhotoScan(observations, max_conflict_examples)
+
+    board = game.board()
+    start_ply = game.ply()
+
+    stack: List[Tuple[GameNode, Iterator[ChildNode], bool, int]] = [(game, iter(game.variations), False, start_ply)]
+
+    while stack:
+        node, variations, entered, ply = stack[-1]
+
+        if not entered:
+            scan.visit(node, board, ply)
+            stack[-1] = (node, variations, True, ply)
+            continue
+
+        try:
+            child = next(variations)
+        except StopIteration:
+            stack.pop()
+            if stack:
+                board.pop()
+        else:
+            board.push(child.move)
+            stack.append((child, iter(child.variations), False, ply + 1))
+
+    return scan
+
+
+class _PhotoScan:
+    def __init__(self, observations: Sequence[Sequence[Tuple[chess.Square, Optional[chess.Piece]]]], max_conflict_examples: int) -> None:
+        self.observations = observations
+        self.max_conflict_examples = max_conflict_examples
+
+        size = len(observations)
+        self.local_candidates: List[List[PhotoCandidate]] = [[] for _ in range(size)]
+        self.matching: List[Dict[chess.Square, int]] = [{} for _ in range(size)]
+        self.conflicting: List[Dict[chess.Square, int]] = [{} for _ in range(size)]
+        self.solely_conflicting: List[Dict[chess.Square, int]] = [{} for _ in range(size)]
+        self.examples: List[Dict[chess.Square, List[PhotoConflict]]] = [{} for _ in range(size)]
+
+        for index, photo_observations in enumerate(observations):
+            for square, _ in photo_observations:
+                self.matching[index][square] = 0
+                self.conflicting[index][square] = 0
+                self.solely_conflicting[index][square] = 0
+                self.examples[index][square] = []
+
+    def visit(self, node: GameNode, board: chess.Board, ply: int) -> None:
+        for photo_index, photo_observations in enumerate(self.observations):
+            matches = self.matching[photo_index]
+            conflicts = self.conflicting[photo_index]
+            sole = self.solely_conflicting[photo_index]
+            samples = self.examples[photo_index]
+
+            mismatches: List[Tuple[chess.Square, Optional[chess.Piece], Optional[chess.Piece]]] = []
+
+            for square, expected in photo_observations:
+                actual = board.piece_at(square)
+                if actual == expected:
+                    matches[square] += 1
+                else:
+                    conflicts[square] += 1
+                    mismatches.append((square, expected, actual))
+
+            if not mismatches:
+                self.local_candidates[photo_index].append(PhotoCandidate(
+                    node=node,
+                    ply=ply,
+                    board_fen=board.board_fen(),
+                    fen=board.fen(),
+                    matched_squares=tuple(square for square, _ in photo_observations),
+                ))
+            elif len(mismatches) == 1:
+                square, expected, actual = mismatches[0]
+                sole[square] += 1
+                if len(samples[square]) < self.max_conflict_examples:
+                    samples[square].append(PhotoConflict(node, square, expected, actual))
+
+
+def _ancestor_nodes(node: GameNode, max_ply_gap: Optional[int]) -> Iterator[GameNode]:
+    """
+    Yields *node* itself (a gap of zero plies), then its ancestors, up to
+    *max_ply_gap* plies away. The node itself allows consecutive photos to
+    show the same position.
+    """
+    steps = 0
+    current: Optional[GameNode] = node
+    while current is not None:
+        if max_ply_gap is not None and steps > max_ply_gap:
+            break
+        yield current
+        current = current.parent
+        steps += 1
+
+
+def index_photos(
+        game: Game,
+        photos: Iterable[BoardPhoto],
+        *,
+        path_consistent: bool = True,
+        max_ply_gap: Optional[int] = None,
+        max_conflict_examples: int = 3) -> PhotoIndex:
+    """
+    Indexes a sequence of sparse board photos into *game*.
+
+    Photos must be given in shooting order. A photo is represented by
+    :class:`BoardPhoto`, which only constrains the squares that are legible.
+
+    By default the photos are additionally required to lie on one variation
+    path, in order. Consecutive photos may skip moves, including across
+    variation boundaries, as long as one legal root-to-leaf path contains all
+    of them. Set *path_consistent* to ``False`` to consider each photo
+    independently. *max_ply_gap* optionally limits how many plies apart two
+    consecutive photos may be.
+
+    The result is narrowed both forwards and backwards: a candidate for an
+    early photo survives only if a later photo can still be reached from it.
+    Candidates are game nodes, not positions, so the same position reached by
+    different move orders remains visible as distinct candidates.
+
+    >>> import chess
+    >>> import chess.pgn
+    >>>
+    >>> game = chess.pgn.Game.from_board(chess.Board())
+    >>> index = chess.pgn.index_photos(game, [chess.pgn.BoardPhoto({"e2": "P"})])
+    >>> len(index[0].candidates)
+    1
+
+    Complexity is `O(n * p)` for n game nodes and p photos, plus the path
+    consistency passes.
+    """
+    if max_ply_gap is not None and max_ply_gap < 1:
+        raise ValueError("max_ply_gap must be at least 1")
+
+    photos = tuple(photos)
+    if not photos:
+        return PhotoIndex(game, (), path_consistent, max_ply_gap)
+
+    observations = [photo.observations for photo in photos]
+
+    scan = _walk_game_nodes(game, observations, max_conflict_examples)
+
+    local_candidates = scan.local_candidates
+    matching = scan.matching
+    conflicting = scan.conflicting
+    solely_conflicting = scan.solely_conflicting
+    examples = scan.examples
+
+    final_candidates: List[List[PhotoCandidate]] = [list(candidates) for candidates in local_candidates]
+
+    if path_consistent and len(photos) > 1:
+        forward: List[Set[GameNode]] = [set() for _ in photos]
+        backward: List[Set[GameNode]] = [set() for _ in photos]
+
+        forward[0] = {candidate.node for candidate in local_candidates[0]}
+        for i in range(1, len(photos)):
+            allowed: Set[GameNode] = set()
+            previous = forward[i - 1]
+            if previous:
+                for candidate in local_candidates[i]:
+                    if any(ancestor in previous for ancestor in _ancestor_nodes(candidate.node, max_ply_gap)):
+                        allowed.add(candidate.node)
+            forward[i] = allowed
+
+        backward[-1] = {candidate.node for candidate in local_candidates[-1]}
+        for i in range(len(photos) - 2, -1, -1):
+            reachable_ancestors: Set[GameNode] = set()
+            for candidate in local_candidates[i + 1]:
+                if candidate.node in backward[i + 1]:
+                    reachable_ancestors.update(_ancestor_nodes(candidate.node, max_ply_gap))
+            backward[i] = {
+                candidate.node
+                for candidate in local_candidates[i]
+                if candidate.node in reachable_ancestors
+            }
+
+        for i in range(len(photos)):
+            final_candidates[i] = [
+                candidate
+                for candidate in local_candidates[i]
+                if candidate.node in forward[i] and candidate.node in backward[i]
+            ]
+
+    matches_result: List[PhotoMatch] = []
+
+    for i, photo in enumerate(photos):
+        evidence = tuple(
+            PhotoSquareEvidence(
+                square=square,
+                expected=expected,
+                matching=matching[i][square],
+                conflicting=conflicting[i][square],
+                solely_conflicting=solely_conflicting[i][square],
+                examples=tuple(examples[i][square]),
+            )
+            for square, expected in photo.observations
+        )
+
+        final_nodes = {candidate.node for candidate in final_candidates[i]}
+        path_excluded = tuple(
+            candidate for candidate in local_candidates[i]
+            if candidate.node not in final_nodes
+        )
+
+        matches_result.append(PhotoMatch(
+            photo=photo,
+            local_candidates=tuple(local_candidates[i]),
+            candidates=tuple(final_candidates[i]),
+            path_excluded=path_excluded,
+            evidence=evidence,
+        ))
+
+    return PhotoIndex(game, tuple(matches_result), path_consistent, max_ply_gap)
 
 
 class BaseVisitor(abc.ABC, Generic[ResultT]):

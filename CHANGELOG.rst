@@ -1,6 +1,18 @@
 Changelog for python-chess
 ==========================
 
+New in v1.11.3 (unreleased)
+---------------------------
+
+New features:
+
+* ``chess.pgn``: Add ``BoardPhoto`` and ``index_photos()`` to index sparse
+  board transcriptions into a game tree. Candidates are individual nodes, so
+  transpositions keep their distinct paths. By default photos must lie on a
+  single variation path in shooting order, with moves optionally skipped, and
+  later photos narrow the candidates of earlier ones. ``PhotoIndex.report()``
+  explains which visible squares support or reject candidates.
+
 New in v1.11.2 (25th Feb 2025)
 ------------------------------
 
