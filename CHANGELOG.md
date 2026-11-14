@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+### Added
+- Timing audit: `junitparser timeaudit` and the `junitparser.timingaudit` module check whether suite times can still be explained by per-source rounding and a configurable preparation-time range, report the contradicting child subset with the minimal exceeded time, and treat missing `time` attributes as unknown instead of `0.000`.
+
 ## [5.0.3] - 2026-08-31
 ### Fixed
 - Issue 177: Fix 177 different behavior of + and +=.

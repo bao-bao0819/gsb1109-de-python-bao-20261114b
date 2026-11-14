@@ -17,24 +17,46 @@ from .junitparser import (
     TestCase,
     TestSuite,
 )
+from .timingaudit import (
+    EXCEEDED,
+    OK,
+    SHORTFALL,
+    UNKNOWN,
+    ChildTiming,
+    SuiteFinding,
+    TimeInterval,
+    audit_timing,
+    format_report,
+    parse_time_interval,
+)
 
 version = _dist_version("junitparser")
 
 __all__ = [
     "Attr",
+    "ChildTiming",
     "Element",
     "Error",
+    "EXCEEDED",
     "Failure",
     "FloatAttr",
     "IntAttr",
     "JUnitXml",
     "JUnitXmlError",
+    "OK",
     "Properties",
     "Property",
+    "SHORTFALL",
     "Skipped",
+    "SuiteFinding",
     "SystemOut",
     "SystemErr",
     "TestCase",
     "TestSuite",
+    "TimeInterval",
+    "UNKNOWN",
+    "audit_timing",
+    "format_report",
+    "parse_time_interval",
     "version",
 ]
