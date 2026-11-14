@@ -3038,6 +3038,114 @@ class PgnTestCase(unittest.TestCase):
             self.assertEqual(game, None)
 
 
+class MergeAnnotationsTestCase(unittest.TestCase):
+
+    def read_game(self, pgn):
+        game = chess.pgn.read_game(io.StringIO(pgn))
+        self.assertEqual(game.errors, [])
+        return game
+
+    def test_reordered_variations(self):
+        base = self.read_game("1. e4 e5 (1... c5 2. Nf3) (1... e6) 2. Nf3 *")
+        first = self.read_game("1. e4 e5 (1... c5 2. Nf3 {[%cal Gg1f3]}) (1... e6) 2. Nf3 *")
+        second = self.read_game("1. e4 e5 (1... e6) (1... c5 2. Nf3) {sharp} 2. Nf3 *")
+
+        merged = chess.pgn.merge_annotations(base, first, second)
+        self.assertEqual(merged.accept(chess.pgn.StringExporter(headers=False)),
+                         "1. e4 e5 { sharp } ( 1... c5 2. Nf3 { [%cal Gg1f3] } ) ( 1... e6 ) 2. Nf3 *")
+
+        # Input games are not modified.
+        self.assertEqual(base.accept(chess.pgn.StringExporter(headers=False)),
+                         "1. e4 e5 ( 1... c5 2. Nf3 ) ( 1... e6 ) 2. Nf3 *")
+
+    def test_promoted_variation(self):
+        base = self.read_game("1. e4 e5 (1... c5) 2. Nf3 *")
+        edited = self.read_game("1. e4 c5 (1... e5 {main line} 2. Nf3) 2. Nf3 *")
+
+        merged = chess.pgn.merge_annotations(base, edited)
+        self.assertEqual(merged.accept(chess.pgn.StringExporter(headers=False)),
+                         "1. e4 e5 { main line } ( 1... c5 ) 2. Nf3 *")
+
+    def test_comment_additions(self):
+        base = self.read_game("1. e4 e5 2. Nf3 *")
+        first = self.read_game("1. e4 {A} e5 2. Nf3 *")
+        second = self.read_game("1. e4 e5 {B} 2. Nf3 *")
+
+        merged = chess.pgn.merge_annotations(base, first, second)
+        self.assertEqual(merged.accept(chess.pgn.StringExporter(headers=False)),
+                         "1. e4 { A } 1... e5 { B } 2. Nf3 *")
+
+        # Independent additions on the same node are combined.
+        first = self.read_game("1. e4 {A} e5 2. Nf3 *")
+        second = self.read_game("1. e4 {B} e5 2. Nf3 *")
+        merged = chess.pgn.merge_annotations(base, first, second)
+        self.assertEqual(merged.accept(chess.pgn.StringExporter(headers=False)),
+                         "1. e4 { A B } 1... e5 2. Nf3 *")
+
+    def test_arrow_edits(self):
+        base = self.read_game("1. e4 {[%cal Ge2e4]} e5 *")
+
+        # Deleted by one editor, untouched by the other.
+        deleted = self.read_game("1. e4 e5 *")
+        untouched = self.read_game("1. e4 {[%cal Ge2e4]} e5 *")
+        merged = chess.pgn.merge_annotations(base, deleted, untouched)
+        self.assertEqual(merged.accept(chess.pgn.StringExporter(headers=False)), "1. e4 e5 *")
+
+        # Recolored by one editor, untouched by the other.
+        recolored = self.read_game("1. e4 {[%cal Re2e4]} e5 *")
+        merged = chess.pgn.merge_annotations(base, recolored, untouched)
+        self.assertEqual(merged.accept(chess.pgn.StringExporter(headers=False)),
+                         "1. e4 { [%cal Re2e4] } 1... e5 *")
+
+        # Deleted by both editors.
+        merged = chess.pgn.merge_annotations(base, deleted, deleted)
+        self.assertEqual(merged.accept(chess.pgn.StringExporter(headers=False)), "1. e4 e5 *")
+
+        # Added by one editor.
+        plain = self.read_game("1. e4 e5 *")
+        annotated = self.read_game("1. e4 {[%cal Re4e5]} e5 *")
+        merged = chess.pgn.merge_annotations(plain, annotated, plain)
+        self.assertEqual(merged.accept(chess.pgn.StringExporter(headers=False)),
+                         "1. e4 { [%cal Re4e5] } 1... e5 *")
+
+    def test_arrow_conflict(self):
+        base = self.read_game("1. e4 {[%cal Ge2e4]} e5 *")
+
+        # Deleted by one editor, recolored by the other.
+        deleted = self.read_game("1. e4 e5 *")
+        recolored = self.read_game("1. e4 {[%cal Re2e4]} e5 *")
+        with self.assertRaises(chess.pgn.MergeConflictError):
+            chess.pgn.merge_annotations(base, deleted, recolored)
+
+        # Recolored differently by both editors.
+        other_color = self.read_game("1. e4 {[%cal Be2e4]} e5 *")
+        with self.assertRaises(chess.pgn.MergeConflictError):
+            chess.pgn.merge_annotations(base, recolored, other_color)
+
+    def test_merge_preserves_reachability(self):
+        base = self.read_game("1. e4 e5 (1... c5 2. Nf3 d6) (1... e6) 2. Nf3 Nc6 *")
+        edited = self.read_game("1. e4 e5 (1... e6) (1... c5 2. Nf3 {[%csl Rd6]} d6) 2. Nf3 Nc6 *")
+
+        merged = chess.pgn.merge_annotations(base, edited)
+
+        # Replay the mainline and all variations from the root.
+        def replay(node, board):
+            for child in node.variations:
+                self.assertIn(child.move, board.legal_moves)
+                board.push(child.move)
+                replay(child, board)
+                board.pop()
+
+        replay(merged, merged.board())
+        self.assertEqual(" ".join(move.uci() for move in merged.mainline_moves()), "e2e4 e7e5 g1f3 b8c6")
+
+    def test_different_starting_position(self):
+        base = self.read_game("1. e4 e5 *")
+        other = self.read_game("[FEN \"4k3/8/8/8/8/8/8/4K3 w - - 0 1\"]\n1. Kd2 *")
+        with self.assertRaises(ValueError):
+            chess.pgn.merge_annotations(base, other)
+
+
 @unittest.skipIf(sys.platform == "win32" and (3, 8, 0) <= sys.version_info < (3, 8, 1), "https://bugs.python.org/issue34679")
 class EngineTestCase(unittest.TestCase):
 

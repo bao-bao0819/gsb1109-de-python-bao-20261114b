@@ -106,3 +106,14 @@ These functions allow for quickly skimming games without fully parsing them.
 .. autofunction:: chess.pgn.read_headers
 
 .. autofunction:: chess.pgn.skip_game
+
+Merging
+-------
+
+Annotations (comments and arrows) from independently edited copies of a game
+can be merged back into a single game, even if sibling variations have been
+reordered.
+
+.. autofunction:: chess.pgn.merge_annotations
+
+.. autoclass:: chess.pgn.MergeConflictError

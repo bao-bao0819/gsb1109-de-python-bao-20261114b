@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import copy
 import dataclasses
 import enum
 import itertools
@@ -1914,3 +1915,207 @@ def parse_time_control(time_control: str) -> TimeControl:
         tc.type = TimeControlType.STANDARD
 
     return tc
+
+
+class MergeConflictError(ValueError):
+    """
+    Raised when merging annotations fails due to conflicting edits, for
+    example when one editor deleted an arrow that another editor recolored.
+    """
+
+
+def _describe_node(node: GameNode) -> str:
+    moves: List[chess.Move] = []
+    while node.parent is not None:
+        moves.append(node.move)
+        node = node.parent
+
+    if not moves:
+        return "root node"
+
+    moves.reverse()
+    try:
+        return node.game().board().variation_san(moves)
+    except ValueError:
+        return " ".join(move.uci() for move in moves)
+
+
+def _split_arrows(comments: List[str]) -> Tuple[Dict[Tuple[Square, Square], str], str]:
+    """
+    Splits ``[%csl ...]`` and ``[%cal ...]`` annotations off the given
+    comments. Returns a mapping of arrow keys ``(tail, head)`` to colors and
+    the remaining comment text.
+    """
+    full = " ".join(comments)
+
+    arrows: Dict[Tuple[Square, Square], str] = {}
+    for match in ARROWS_REGEX.finditer(full):
+        for group in match.group("arrows").split(","):
+            arrow = chess.svg.Arrow.from_pgn(group)
+            arrows[(arrow.tail, arrow.head)] = arrow.color
+
+    text = ARROWS_REGEX.sub(_condense_affix(""), full)
+    return arrows, " ".join(text.split())
+
+
+def _render_comments(text: str, arrows: Dict[Tuple[Square, Square], str]) -> List[str]:
+    csl: List[str] = []
+    cal: List[str] = []
+
+    for (tail, head), color in arrows.items():
+        pgn = chess.svg.Arrow(tail, head, color=color).pgn()
+        (csl if tail == head else cal).append(pgn)
+
+    prefix = ""
+    if csl:
+        prefix += f"[%csl {','.join(csl)}]"
+    if cal:
+        prefix += f"[%cal {','.join(cal)}]"
+
+    comments = [prefix] if prefix else []
+    if text:
+        comments.append(text)
+    return comments
+
+
+def _merge_arrows(base: Dict[Tuple[Square, Square], str], edited: List[Dict[Tuple[Square, Square], str]], node: GameNode) -> Dict[Tuple[Square, Square], str]:
+    merged: Dict[Tuple[Square, Square], str] = {}
+
+    for key in dict.fromkeys(itertools.chain(base, *edited)):
+        base_color = base.get(key)
+        changed = {version.get(key) for version in edited} - {base_color}
+
+        if not changed:
+            color = base_color
+        elif len(changed) == 1:
+            color = changed.pop()
+        else:
+            tail, head = key
+            arrow = chess.svg.Arrow(tail, head, color=base_color or "green")
+            raise MergeConflictError(
+                f"conflicting edits of arrow {arrow.pgn()} at {_describe_node(node)}")
+
+        if color is not None:
+            merged[key] = color
+
+    return merged
+
+
+def _merge_text(base: str, edited: List[str], node: GameNode) -> str:
+    changed: List[str] = []
+    for text in edited:
+        if text != base and text not in changed:
+            changed.append(text)
+
+    if not changed:
+        return base
+    if len(changed) == 1:
+        return changed[0]
+
+    # Multiple different edits. Merge independent additions, but not
+    # contradictory edits of the same text.
+    if not base:
+        return " ".join(changed)
+    if all(text.startswith(base) for text in changed):
+        return " ".join([base] + [text[len(base):].strip() for text in changed])
+    raise MergeConflictError(f"conflicting comments at {_describe_node(node)}")
+
+
+def _merge_comments(base_comments: List[str], edited_comments: List[List[str]], node: GameNode) -> List[str]:
+    base_arrows, base_text = _split_arrows(base_comments)
+    edited = [_split_arrows(comments) for comments in edited_comments]
+
+    arrows = _merge_arrows(base_arrows, [arrows for arrows, _ in edited], node)
+    text = _merge_text(base_text, [text for _, text in edited], node)
+    return _render_comments(text, arrows)
+
+
+def _match_children(base_children: List[ChildNode], edited_children: List[ChildNode]) -> List[Optional[ChildNode]]:
+    """
+    Matches base children to edited children by move, rather than by
+    variation index, so that reordered variations still correspond. If the
+    same move occurs multiple times, occurrences are matched in order of
+    appearance.
+    """
+    by_move: Dict[chess.Move, List[ChildNode]] = {}
+    for child in edited_children:
+        by_move.setdefault(child.move, []).append(child)
+
+    matched = []
+    for child in base_children:
+        candidates = by_move.get(child.move)
+        matched.append(candidates.pop(0) if candidates else None)
+    return matched
+
+
+def merge_annotations(base: Game, *edited: Game) -> Game:
+    """
+    Merges annotations (comments and arrows) from independently edited
+    copies of a game back into a single game.
+
+    The *edited* games are expected to be annotated copies of *base*, for
+    example reviewed by multiple proofreaders. Nodes are matched by the
+    starting position and the moves leading to them, so sibling variations
+    may have been reordered freely. If the same move occurs multiple times
+    among siblings, occurrences are matched in order of appearance.
+    Annotations on nodes that do not exist in *base* are ignored.
+
+    Comments and ``[%csl ...]``/``[%cal ...]`` arrow annotations are merged
+    three-way against *base*: Changes made by only one editor (or identical
+    changes made by all editors) are kept, including deletions. Independent
+    comment additions are combined.
+
+    Raises :class:`chess.pgn.MergeConflictError` if edits conflict, for
+    example if one editor deleted an arrow that another editor recolored.
+
+    Returns a new game; the given games are not modified. The merged game
+    is validated by replaying the mainline and all variations from the
+    root position.
+
+    >>> import io
+    >>>
+    >>> base = chess.pgn.read_game(io.StringIO("1. e4 e5 (1... c5 2. Nf3) (1... e6) 2. Nf3 *"))
+    >>> first = chess.pgn.read_game(io.StringIO("1. e4 e5 (1... c5 2. Nf3 {[%cal Gg1f3]}) (1... e6) 2. Nf3 *"))
+    >>> second = chess.pgn.read_game(io.StringIO("1. e4 e5 (1... e6) (1... c5 2. Nf3) {sharp} 2. Nf3 *"))
+    >>> merged = chess.pgn.merge_annotations(base, first, second)
+    >>> print(merged.accept(chess.pgn.StringExporter(headers=False)))
+    1. e4 e5 { sharp } ( 1... c5 2. Nf3 { [%cal Gg1f3] } ) ( 1... e6 ) 2. Nf3 *
+    """
+    base_board = base.board()
+    for other in edited:
+        other_board = other.board()
+        if type(base_board).uci_variant != type(other_board).uci_variant or base_board._transposition_key() != other_board._transposition_key():
+            raise ValueError("cannot merge annotations of games with different starting positions")
+
+    merged = copy.deepcopy(base)
+
+    # Merge annotations of corresponding nodes.
+    stack: List[Tuple[GameNode, List[GameNode]]] = [(merged, list(edited))]
+    while stack:
+        node, edited_nodes = stack.pop()
+
+        if edited_nodes:
+            node.comments = _merge_comments(node.comments, [edited_node.comments for edited_node in edited_nodes], node)
+            node.starting_comments = _merge_comments(node.starting_comments, [edited_node.starting_comments for edited_node in edited_nodes], node)
+
+        matched = [_match_children(node.variations, edited_node.variations) for edited_node in edited_nodes]
+        for index, child in enumerate(node.variations):
+            stack.append((child, [corresponding[index] for corresponding in matched if corresponding[index] is not None]))
+
+    # Replay the merged game, ensuring that the mainline and all variations
+    # remain reachable.
+    board = merged.board()
+    iterators = [iter(merged.variations)]
+    while iterators:
+        child = next(iterators[-1], None)
+        if child is None:
+            iterators.pop()
+            if iterators:
+                board.pop()
+            continue
+        if child.move and not board.is_legal(child.move):
+            raise ValueError(f"illegal move {child.move.uci()} at {_describe_node(child)}")
+        board.push(child.move)
+        iterators.append(iter(child.variations))
+
+    return merged
