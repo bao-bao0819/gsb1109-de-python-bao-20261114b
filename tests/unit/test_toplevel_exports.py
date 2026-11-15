@@ -60,7 +60,9 @@ def test_toplevel_submodules():
     """1.2 behavior: formats and cancluster usable via the package namespace."""
     assert isinstance(canmatrix.formats, types.ModuleType)
     assert isinstance(canmatrix.cancluster, types.ModuleType)
+    assert isinstance(canmatrix.reconcile, types.ModuleType)
     assert hasattr(canmatrix.formats, "loads")
+    assert hasattr(canmatrix.reconcile, "reconcile")
 
 
 def test_toplevel_import_without_deprecation_warning():

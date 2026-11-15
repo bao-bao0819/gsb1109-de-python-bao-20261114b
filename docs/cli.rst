@@ -34,12 +34,46 @@ Command Line Interface
     the frame-list-only option ``--frames``. Values exceeding Excel's limit
     of 32767 characters per cell are rejected instead of truncated.
 
+3. **canstatus**:
+
+    reconciles a legacy status report with a re-mapped value table.
+
+    A monthly report may store only the text and count of the value table that
+    was current when it was produced.  If two raw codes shared one text and
+    the new value table splits one of them off, the legacy total has to be
+    distributed over the raw codes rather than assigned to a single status.
+    ``canstatus`` computes the feasible integer range of every new status and
+    can also check whether several proposed counts can occur in the same
+    report::
+
+        canstatus --old old-table.json --new new-table.json \
+            --report report.json
+        canstatus --old old-table.json --new new-table.json \
+            --report report.json --ask "维护=100" --ask "待机=80"
+
+    The input files are JSON or CSV.  A table file is either a plain
+    ``{raw_code: text}`` mapping, a CSV with code and text columns, or a
+    canmatrix JSON export (pass ``--value-table NAME`` when it contains
+    several tables).  The report is a mapping of old label to count, a list of
+    rows, or a mapping of section to rows.  A subtotal file may pin one raw
+    code or one old label; use ``--subtotals`` and, when the report has
+    sections, ``--membership``.
+
+    A subtotal applies only to the section it names.  Two sections containing
+    the same Chinese text are separate constraints and are not merged.  The
+    answer distinguishes individual per-status ranges from joint
+    feasibility: with one old total of 180 shared by ``待机`` and ``维护``,
+    each can individually reach 180, but ``维护=100`` and ``待机=100`` cannot
+    both hold.  ``--json-output`` emits machine-readable ranges and the joint
+    answer.  A worked example is in ``examples/status``; run it with
+    ``python examples/status/reconcile.py`` from the repository root.
+
 
 General
 _______
 
 If you properly install canmatrix using *pip,* the setuptools create
-two executables for you: `canconvert` and `cancompare`. You can find these executables
+three executables for you: `canconvert`, `cancompare` and `canstatus`. You can find these executables
 near to your `python(.exe)`
 
 If you aren't able to find the scripts, you can still run it as

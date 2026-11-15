@@ -31,4 +31,4 @@ from .exceptions import (
 )
 
 # keep 1.2 behavior: submodules usable via the package namespace
-from . import cancluster, formats  # noqa: F401
+from . import cancluster, formats, reconcile  # noqa: F401

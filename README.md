@@ -9,7 +9,7 @@
 ## About
 
 ***Canmatrix*** implements a "Python Can Matrix Object" which describes the can-communication and the needed objects (Boardunits, Frames, Signals, Values, ...)
-***Canmatrix*** also includes two **Tools** (canconvert and cancompare) for converting and comparing **CAN** databases.
+***Canmatrix*** also includes three **Tools** (canconvert, cancompare and canstatus) for converting, comparing and reconciling **CAN** databases and status reports.
 
 - Multiple formats automotive related communication matrix file parsing.
 - CAN message encoding and decoding.

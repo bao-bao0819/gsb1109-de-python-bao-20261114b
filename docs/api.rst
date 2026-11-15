@@ -59,6 +59,12 @@ _______
 .. automodule:: canmatrix.copy
     :members:
 
+reconcile.py
+____________
+
+.. automodule:: canmatrix.reconcile
+    :members:
+
 j1939_decoder.py
 ________________
 

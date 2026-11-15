@@ -57,6 +57,7 @@ classifiers = [
 [project.scripts]
 cancompare = "canmatrix.cli.compare:cli_compare"
 canconvert = "canmatrix.cli.convert:cli_convert"
+canstatus = "canmatrix.cli.status:cli_status"
 
 [project.urls]
 homepage = "https://github.com/ebroecker/canmatrix"
