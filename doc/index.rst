@@ -54,6 +54,32 @@ The simplest tftp server::
 
 See the sample client and server for slightly more complex examples.
 
+Recovering incomplete receive replicas
+=======================================
+A receive backup that lost packets or was interrupted can be completed from
+other replicas of the same transfer.  Recovery accepts a block combination
+only if it satisfies the version declaration and every device-generated
+segment digest; digests may cover several TFTP blocks.  If more than one legal
+completion exists, only ranges that are identical in all of them are
+delivered, and the rest are reported as pending::
+
+    import tftpy
+
+    replica_a = tftpy.Replica('a', {1: b'first bl', 2: b'ock two'})
+    replica_b = tftpy.Replica('b', {3: b' last bl', 4: b''})
+    declaration = tftpy.VersionDeclaration(size=24, blocksize=8, version='v2')
+
+    result = tftpy.recover_file([replica_a, replica_b], declaration)
+    result.write('recovered.bin')
+    print(result.blocks[2].sources)  # replicas usable for block 2
+
+Both the final short block and an empty block carry their source replicas,
+so a confirmed empty file is still attributable.
+
+A manifest-driven batch run is available from the module::
+
+    python -m tftpy.TftpRecovery manifest.json -o output/
+
 API Documentation
 =================
 
@@ -110,5 +136,11 @@ The `TftpContexts` Module
 The `TftpStates` Module
 ~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: tftpy.TftpStates
+   :members:
+   :show-inheritance:
+
+The `TftpRecovery` Module
+~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: tftpy.TftpRecovery
    :members:
    :show-inheritance:

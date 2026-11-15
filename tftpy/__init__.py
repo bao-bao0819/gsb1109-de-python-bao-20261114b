@@ -14,6 +14,14 @@ from .TftpServer import TftpServer
 from .TftpClient import TftpClient
 from . import __name__ as pkg_name
 from . import TftpContexts, TftpPacketFactory, TftpPacketTypes, TftpStates
+from . import TftpRecovery
+from .TftpRecovery import (
+    Replica,
+    SegmentDigest,
+    VersionDeclaration,
+    recover_batch,
+    recover_file,
+)
 import sys
 
 try:

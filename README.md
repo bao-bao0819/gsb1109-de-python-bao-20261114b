@@ -1,5 +1,40 @@
 Copyright, Michael P. Soulier, 2010+
 
+# Recovering incomplete receive replicas
+
+`tftpy.TftpRecovery` combines several incomplete receive backups of one
+transfer. It only accepts block combinations that satisfy the version
+declaration (block size, size, version tag) and every device segment digest;
+a digest may span several TFTP blocks. Replicas are never merged by a
+per-block majority vote. If two legal completions exist, only byte ranges
+identical in both are delivered and the rest are marked pending.
+
+The final short block and the empty block of a confirmed empty file both
+carry the replica they came from, so every delivered byte has a readback
+source.
+
+```python
+import tftpy
+
+result = tftpy.recover_batch([
+    {
+        "name": "sample.bin",
+        "size": 24,
+        "blocksize": 8,
+        "version": "v2",
+        "digests": [{"start": 0, "end": 24, "digest": "sha256:..."}],
+        "replicas": [
+            {"name": "a", "blocks": {"1": "hex:...", "3": "hex:..."}},
+            {"name": "b", "blocks": {"2": "hex:...", "4": ""}},
+        ],
+    }
+])
+print(result["sample.bin"].blocks[0].sources)
+```
+
+Binary block data in a JSON manifest must be tagged `hex:` or `base64:`;
+untagged strings are treated as UTF-8 text.
+
 # Installation
 While the module should just be in pypi, so you should be able to just do
 pip install tftpy, if you have the source distribution you can also install

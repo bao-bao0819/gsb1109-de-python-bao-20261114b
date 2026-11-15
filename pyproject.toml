@@ -26,4 +26,4 @@ Homepage = "https://github.com/msoulier/tftpy"
 Issues = "https://github.com/msoulier/tftpy/issues"
 
 [tools.setuptools]
-script-files = ["bin/tftpy_client.py", "bin/tftpy_server.py"]
+script-files = ["bin/tftpy_client.py", "bin/tftpy_server.py", "bin/tftpy_recover.py"]
