@@ -130,6 +130,45 @@ You have two or more XML files, and you want to merge them into one.
 Note that it won't check for duplicate entries. You need to deal with them on
 your own.
 
+Resolve inherited properties
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A property like ``region`` may be defined on a top-level testsuite and
+redefined by nested suites. ``resolve_properties`` computes the effective
+value of every property for each testcase, with per-attribute inheritance
+modes: ``nearest`` (closest definition wins), ``accumulate`` (values collect
+into a set), and ``uniform`` (definitions along the whole path must agree).
+
+.. code-block:: python
+
+    from junitparser import JUnitXml, InheritanceConfig, resolve_properties
+
+    xml = JUnitXml.fromfile('/path/to/junit.xml')
+    config = InheritanceConfig.from_dict({
+        "region": "nearest",
+        "labels": "accumulate",
+        "build": "uniform",
+    })
+    result = resolve_properties(xml, config)
+
+    for cd in result.resolved:
+        print(cd.case.name, cd["region"].value)
+
+Resolution is path-based, so same-named sibling suites are interpreted
+independently. If a single-valued attribute gets two different values at the
+same level, or a ``uniform`` attribute disagrees along the path, the
+conflicting sources are listed in ``result.conflicts`` and the affected
+cases are isolated in ``result.quarantined``.
+
+Each resolved dimension keeps its effective sources, so when an upper-level
+property changes later, you can tell which historical cases' dimensions
+would actually change with it:
+
+.. code-block:: python
+
+    # Cases whose "region" dimension depends on the top-level definition.
+    result.impacted_by(("batch",), "region")
+
 Schema Support
 ~~~~~~~~~~~~~~~
 
