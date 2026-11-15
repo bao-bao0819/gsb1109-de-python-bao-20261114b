@@ -19,6 +19,7 @@ import chess.pgn
 import chess.polyglot
 import chess.svg
 import chess.syzygy
+import chess.training
 import chess.variant
 
 
@@ -3036,6 +3037,254 @@ class PgnTestCase(unittest.TestCase):
 
             game = chess.pgn.read_game(pgn)
             self.assertEqual(game, None)
+
+
+class TrainingExportTestCase(unittest.TestCase):
+
+    @staticmethod
+    def _weighted_game():
+        # 1.e4
+        #     1...e5 2.Nf3 (weight 2) 2.Bb5 (weight 1)
+        #     1...d5?? (excluded, illustrative bad move) 2.Qh5
+        game = chess.pgn.Game()
+        e4 = game.add_variation(chess.Move.from_uci("e2e4"))
+        e5 = e4.add_variation(chess.Move.from_uci("e7e5"))
+        e5.add_variation(chess.Move.from_uci("g1f3"))
+        e5.add_variation(chess.Move.from_uci("f1b5"))
+        d5 = e4.add_variation(chess.Move.from_uci("d7d5"))
+        d5.nags.add(chess.pgn.NAG_BLUNDER)
+        d5.add_variation(chess.Move.from_uci("d1h5"))
+        return game
+
+    @staticmethod
+    def _move_weight(node):
+        return 2.0 if node.move == chess.Move.from_uci("g1f3") else 1.0
+
+    def _by_fen(self, samples):
+        return {sample.fen: sample for sample in samples}
+
+    def test_fixed_total_weight_equal_split(self):
+        game = chess.pgn.Game()
+        e4 = game.add_variation(chess.Move.from_uci("e2e4"))
+        e4.add_variation(chess.Move.from_uci("e7e5"))
+        e4.add_variation(chess.Move.from_uci("c7c5"))
+
+        samples = self._by_fen(chess.training.export_samples(game))
+        root = samples[game.board().fen()]
+        e4_sample = samples[e4.board().fen()]
+
+        self.assertEqual(root.weight, 1.0)
+        self.assertEqual(root.next_moves, {"e2e4": 1.0})
+        self.assertEqual(e4_sample.next_moves, {"e7e5": 0.5, "c7c5": 0.5})
+        self.assertAlmostEqual(sum(e4_sample.next_moves.values()), e4_sample.weight)
+
+    def test_proportional_split(self):
+        game = self._weighted_game()
+        e5 = game.variation(0).variation(0)
+        sample = self._by_fen(
+            chess.training.export_samples(game, move_weight=self._move_weight)
+        )[e5.board().fen()]
+        self.assertAlmostEqual(sample.next_moves["g1f3"], 2 / 3)
+        self.assertAlmostEqual(sample.next_moves["f1b5"], 1 / 3)
+        self.assertAlmostEqual(sum(sample.next_moves.values()), 1.0)
+
+    def test_excluded_variation_redistributed_and_traversable(self):
+        game = self._weighted_game()
+        e4 = game.variation(0)
+        d5 = e4.variation(1)
+
+        # Default: excluded line drops out, its share stays with e5.
+        live = chess.training.export_samples(game)
+        live_fens = {sample.fen for sample in live}
+        self.assertNotIn(d5.board().fen(), live_fens)
+        self.assertNotIn(d5.variation(0).board().fen(), live_fens)
+
+        e4_sample = self._by_fen(live)[e4.board().fen()]
+        self.assertEqual(e4_sample.next_moves, {"e7e5": 1.0})
+        self.assertTrue(all(not sample.excluded and sample.weight > 0.0 for sample in live))
+
+        # Explicitly included: still traversable/searchable, but weightless.
+        with_excluded = chess.training.export_samples(game, include_excluded=True)
+        indexed = self._by_fen(with_excluded)
+        d5_sample = indexed[d5.board().fen()]
+        self.assertTrue(d5_sample.excluded)
+        self.assertEqual(d5_sample.weight, 0.0)
+        self.assertEqual(d5_sample.origins[0].path, ("e2e4", "d7d5"))
+        self.assertTrue(d5_sample.origins[0].excluded)
+        # The child of the bad move was still walked.
+        self.assertIn(d5.variation(0).board().fen(), indexed)
+
+    def test_transposition_merge_retains_paths(self):
+        game = chess.pgn.Game()
+        line_a = game.add_variation(chess.Move.from_uci("e2e4"))
+        line_a = line_a.add_variation(chess.Move.from_uci("e7e5"))
+        line_a = line_a.add_variation(chess.Move.from_uci("g1f3"))
+        line_a = line_a.add_variation(chess.Move.from_uci("b8c6"))
+
+        line_b = game.add_variation(chess.Move.from_uci("g1f3"))
+        line_b = line_b.add_variation(chess.Move.from_uci("b8c6"))
+        line_b = line_b.add_variation(chess.Move.from_uci("e2e4"))
+        line_b = line_b.add_variation(chess.Move.from_uci("e7e5"))
+
+        self.assertEqual(
+            line_a.board()._transposition_key(),
+            line_b.board()._transposition_key(),
+        )
+
+        def move_weight(node):
+            if node.parent is game:
+                return 3.0 if node.move == chess.Move.from_uci("e2e4") else 2.0
+            return 1.0
+
+        samples = chess.training.export_samples(game, move_weight=move_weight)
+        fens = [sample.fen for sample in samples]
+        self.assertEqual(len(fens), len(set(fens)))  # no duplicated positions
+
+        merged = next(sample for sample in samples if sample.fen == line_a.board().fen())
+        self.assertAlmostEqual(merged.weight, 1.0)
+        self.assertEqual(len(merged.origins), 2)
+        paths = sorted(origin.path for origin in merged.origins)
+        self.assertEqual(paths, [
+            ("e2e4", "e7e5", "g1f3", "b8c6"),
+            ("g1f3", "b8c6", "e2e4", "e7e5"),
+        ])
+        weights = sorted(round(origin.weight, 9) for origin in merged.origins)
+        self.assertEqual(weights, [0.4, 0.6])
+
+    def test_weight_identity_and_truncation_conserve_total(self):
+        game = self._weighted_game()
+        for max_depth in range(0, 5):
+            samples = chess.training.export_samples(
+                game, max_depth=max_depth, move_weight=self._move_weight
+            )
+            # Per-sample conservation: incoming weight is either resting or
+            # forwarded to a child.
+            for sample in samples:
+                self.assertAlmostEqual(
+                    sample.weight,
+                    sample.resting_weight + sum(sample.next_moves.values()),
+                    places=9,
+                )
+            # Whole-game conservation at every depth cut.
+            resting_mass = sum(sample.resting_weight for sample in samples)
+            self.assertAlmostEqual(resting_mass, 1.0, places=9)
+
+        cut = chess.training.export_samples(game, max_depth=1)
+        cut_terminals = [sample for sample in cut if sample.is_terminal]
+        self.assertEqual(len(cut_terminals), 1)
+        self.assertTrue(cut_terminals[0].truncated)
+        self.assertEqual(cut_terminals[0].next_moves, {})
+        self.assertAlmostEqual(cut_terminals[0].resting_weight, 1.0)
+
+    def test_total_weight_scaling(self):
+        game = self._weighted_game()
+        samples = chess.training.export_samples(
+            game, total_weight=10.0, move_weight=self._move_weight
+        )
+        resting_mass = sum(sample.resting_weight for sample in samples)
+        self.assertAlmostEqual(resting_mass, 10.0)
+
+    def test_merged_transposition_partly_terminal_conserves(self):
+        # The same position is a leaf on one line but continues on the other.
+        game = chess.pgn.Game()
+        line_a = game.add_variation(chess.Move.from_uci("e2e4"))
+        line_a = line_a.add_variation(chess.Move.from_uci("e7e5"))
+        line_a = line_a.add_variation(chess.Move.from_uci("g1f3"))
+        line_a = line_a.add_variation(chess.Move.from_uci("b8c6"))  # shared position
+
+        line_b = game.add_variation(chess.Move.from_uci("g1f3"))
+        line_b = line_b.add_variation(chess.Move.from_uci("b8c6"))
+        line_b = line_b.add_variation(chess.Move.from_uci("e2e4"))
+        line_b = line_b.add_variation(chess.Move.from_uci("e7e5"))  # ends here
+
+        self.assertEqual(
+            line_a.board()._transposition_key(),
+            line_b.board()._transposition_key(),
+        )
+
+        # Line A keeps going past the shared position; line B stops there.
+        continuation = line_a.add_variation(chess.Move.from_uci("f1b5"))
+
+        samples = chess.training.export_samples(game)
+        # The shared position is stored under the first occurrence (line A);
+        # FEN move counters differ, but the transposition key merges them.
+        shared = next(sample for sample in samples if sample.fen == line_a.board().fen())
+        self.assertEqual(shared.next_moves, {"f1b5": 0.5})
+        self.assertAlmostEqual(shared.resting_weight, 0.5)  # line B's share rests
+        self.assertAlmostEqual(shared.weight, 1.0)
+
+        for sample in samples:
+            self.assertAlmostEqual(
+                sample.weight,
+                sample.resting_weight + sum(sample.next_moves.values()),
+                places=9,
+            )
+        self.assertAlmostEqual(sum(sample.resting_weight for sample in samples), 1.0)
+        self.assertIn(continuation.board().fen(), {sample.fen for sample in samples})
+
+    def test_validation_and_empty(self):
+        with self.assertRaises(ValueError):
+            chess.training.export_samples(chess.pgn.Game(), total_weight=-1.0)
+        with self.assertRaises(ValueError):
+            chess.training.export_samples(chess.pgn.Game(), max_depth=-1)
+        self.assertEqual(chess.training.export_samples(chess.pgn.Game()), [])
+
+    def test_all_children_excluded_rests_on_parent(self):
+        game = chess.pgn.Game()
+        e4 = game.add_variation(chess.Move.from_uci("e2e4"))
+        for uci in ("e7e5", "c7c5"):
+            reply = e4.add_variation(chess.Move.from_uci(uci))
+            reply.nags.add(chess.pgn.NAG_BLUNDER)
+
+        samples = self._by_fen(chess.training.export_samples(game))
+        e4_sample = samples[e4.board().fen()]
+        self.assertEqual(e4_sample.next_moves, {})
+        self.assertAlmostEqual(e4_sample.resting_weight, 1.0)
+        self.assertAlmostEqual(
+            sum(sample.resting_weight for sample in samples.values()), 1.0
+        )
+
+        # The weightless replies are still traversable when explicitly requested.
+        with_excluded = chess.training.export_samples(game, include_excluded=True)
+        self.assertEqual(len(with_excluded), 4)  # root, e4, and two weightless replies
+        self.assertTrue(all(sample.weight == 0.0 for sample in with_excluded if sample.excluded))
+
+    def test_zero_move_weights_rest_on_parent(self):
+        game = chess.pgn.Game()
+        e4 = game.add_variation(chess.Move.from_uci("e2e4"))
+        e4.add_variation(chess.Move.from_uci("e7e5"))
+        e4.add_variation(chess.Move.from_uci("c7c5"))
+
+        # e4 still receives weight, but both of its replies weigh zero.
+        def move_weight(node):
+            return 0.0 if node.move in (
+                chess.Move.from_uci("e7e5"), chess.Move.from_uci("c7c5")
+            ) else 1.0
+
+        samples = self._by_fen(chess.training.export_samples(game, move_weight=move_weight))
+        e4_sample = samples[e4.board().fen()]
+        self.assertEqual(e4_sample.next_moves, {})
+        self.assertAlmostEqual(e4_sample.resting_weight, 1.0)
+        self.assertAlmostEqual(
+            sum(sample.resting_weight for sample in samples.values()), 1.0
+        )
+
+    def test_custom_exclusion_rule(self):
+        game = chess.pgn.Game()
+        e4 = game.add_variation(chess.Move.from_uci("e2e4"))
+        e5 = e4.add_variation(chess.Move.from_uci("e7e5"))
+        c5 = e4.add_variation(chess.Move.from_uci("c7c5"))
+
+        # Exclude the Sicilian by move rather than by NAG.
+        def is_c5(node):
+            return node.move == chess.Move.from_uci("c7c5")
+
+        samples = self._by_fen(
+            chess.training.export_samples(game, is_excluded=is_c5)
+        )
+        self.assertEqual(samples[e4.board().fen()].next_moves, {"e7e5": 1.0})
+        self.assertNotIn(c5.board().fen(), samples)
+        self.assertIn(e5.board().fen(), samples)
 
 
 @unittest.skipIf(sys.platform == "win32" and (3, 8, 0) <= sys.version_info < (3, 8, 1), "https://bugs.python.org/issue34679")

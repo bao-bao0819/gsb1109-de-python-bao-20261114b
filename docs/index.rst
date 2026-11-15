@@ -8,6 +8,7 @@ Contents
 
     core
     pgn
+    training
     polyglot
     gaviota
     syzygy
