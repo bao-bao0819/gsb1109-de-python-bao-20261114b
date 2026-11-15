@@ -1,0 +1,5 @@
+Add :mod:`h11.latency`, which computes provable request-to-final-response
+latency bounds from batched byte observations. Each batch is treated as an
+observation window rather than a precise arrival time, h11 locates the request
+end and final response start in the captured streams, interim 1xx responses are
+reported separately, and a missing boundary is reported rather than guessed.

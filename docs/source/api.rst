@@ -1036,6 +1036,118 @@ This works with all the different framing modes (``Content-Length``,
 framing data, update its internal state, and away you go.
 
 
+.. _latency-bounds:
+
+Latency bounds from batched observations
+----------------------------------------
+
+.. versionadded:: 0.17.0
+
+A gateway that polls its sockets every few tens of milliseconds does
+not learn when an individual byte arrived. It only learns that every
+byte in one batch arrived somewhere inside that batch's observation
+window. Treating the callback time as the first byte's arrival time
+silently invents precision, and understates the latency by up to one
+poll interval.
+
+:mod:`h11.latency` instead uses h11's own parsing to locate two byte
+positions in the captured streams:
+
+* the **request end** -- the last byte of the request's
+  :class:`EndOfMessage` (for a bodyless request, the final ``LF`` of
+  the blank line; for chunked requests, the terminating chunk and
+  trailers);
+* the **response start** -- the first byte of the *final* response's
+  status line. A 1xx response never counts here.
+
+Each position is mapped back to the observation window that contained
+it, and the provable range is::
+
+   lower = response_window.start - request_window.end
+   upper = response_window.end   - request_window.start
+
+Both bounds are clamped at zero. If the final response's first byte
+sits in a batch that also holds an earlier response's trailing body
+bytes, the parser walks the bytes in order, so the earlier tail is not
+mistaken for the next response's start.
+
+The API is:
+
+.. class:: ByteChunk(data, start, end)
+
+   One observation batch. ``start``/``end`` are the batch's time
+   window, not the arrival time of any particular byte. Times may be
+   ints if your clock uses integer nanoseconds.
+
+   .. method:: observed_at(data, observed_at, previous_observed_at=None)
+
+      Build a chunk from callback times: the safe window runs from the
+      previous callback through this one. The callback time is the
+      window's *end*, never its start.
+
+.. class:: LatencyAnalyzer
+
+   .. method:: add_request_chunk(chunk)
+               add_response_chunk(chunk)
+               add(direction, chunk)
+               record(direction, data, start, end)
+
+      Append one batch, in wire order. ``chunk`` may be a
+      :class:`ByteChunk`, a ``(data, start, end)`` triple, or a dict
+      with those keys.
+
+   .. method:: analyze()
+
+      Return a list of :class:`RequestLatency`, one per parsed
+      request.
+
+.. function:: analyze_latency(request_chunks, response_chunks=None)
+
+   One-shot wrapper around :class:`LatencyAnalyzer`. If
+   ``response_chunks`` is omitted, pass a single interleaved iterable
+   of ``(direction, data, start, end)`` items instead.
+
+.. class:: RequestLatency
+
+   .. attribute:: request_end
+                  response_start
+
+      :class:`Boundary` objects. Each exposes ``observed``, ``offset``
+      (byte index in that direction's stream), ``chunk_index``,
+      ``window``, and -- when not observed -- a ``reason``.
+
+   .. attribute:: latency
+
+      A :class:`LatencyRange` with ``lower``/``upper`` (or ``None`` on
+      both when a boundary is missing), plus ``observed`` and
+      ``width``.
+
+   .. attribute:: interim_responses
+
+      A tuple of :class:`InterimResponse` objects, one per 1xx
+      response, each carrying its own first-byte
+      :class:`Boundary` and ``latency_after_request_end``. Interim
+      responses are deliberately kept out of :attr:`latency`.
+
+   .. attribute:: missing_sides
+
+      ``("request_end",)``, ``("response_start",)``, both, or empty.
+      If one side was never observed, no latency number is produced;
+      :meth:`explain` names the missing side and the reason.
+
+For example::
+
+   import h11
+
+   analyzer = h11.LatencyAnalyzer()
+   analyzer.record("request", request_bytes, 10.00, 10.05)
+   analyzer.record("response", response_bytes, 10.12, 10.20)
+   for result in analyzer.analyze():
+       print(result.latency)      # LatencyRange(lower=0.07, upper=0.2)
+       if result.missing_sides:
+           print(result.explain())
+
+
 Identifying h11 in requests and responses
 -----------------------------------------
 

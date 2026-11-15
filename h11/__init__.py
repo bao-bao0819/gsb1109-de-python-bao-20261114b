@@ -16,6 +16,16 @@ from h11._events import (
     Request,
     Response,
 )
+from h11._latency import (
+    Boundary,
+    ByteChunk,
+    InterimResponse,
+    LatencyAnalyzer,
+    LatencyRange,
+    ObservationWindow,
+    RequestLatency,
+    analyze_latency,
+)
 from h11._state import (
     CLIENT,
     CLOSED,
@@ -46,6 +56,14 @@ __all__ = (
     "InformationalResponse",
     "Request",
     "Response",
+    "ByteChunk",
+    "ObservationWindow",
+    "Boundary",
+    "LatencyRange",
+    "InterimResponse",
+    "RequestLatency",
+    "LatencyAnalyzer",
+    "analyze_latency",
     "CLIENT",
     "CLOSED",
     "DONE",
