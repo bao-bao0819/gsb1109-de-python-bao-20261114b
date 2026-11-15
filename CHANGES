@@ -1,6 +1,13 @@
 0.7.1 (2020-01-11):
     * include README file in pypi
 
+0.8.0 (unreleased):
+    * added ISRC reconciliation (reconcile_isrc / IsrcReconciler) that
+      keeps the raw ISRC-to-recording lookup, records alias, compatible
+      and mutually-exclusive confirmations, applies transitivity only to
+      aliases, quarantines only explicitly excluded recordings, and reports
+      alias chains that cross an exclusion for manual review
+
 0.7 (2020-01-09):
     * removed support for PUIDs and Echoprint (Alastair Porter, #237)
     * removed the 'artists' include for work lookup (Alastair Porter, #231 & #227)

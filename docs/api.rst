@@ -57,6 +57,31 @@ The valid includes are listed for each function.
 .. autodata:: musicbrainzngs.musicbrainz.VALID_RELEASE_TYPES
 .. autodata:: musicbrainzngs.musicbrainz.VALID_RELEASE_STATUSES
 
+.. _isrc_reconciliation_api:
+
+ISRC Reconciliation
+-------------------
+
+A single ISRC lookup can return several recordings.  These helpers keep the
+raw lookup intact and record explicit confirmations about the returned
+recordings.  ``alias`` confirmations are transitive, ``compatible``
+confirmations only apply to the confirmed pair, and ``mutually-exclusive``
+confirmations quarantine both recordings on the confirmed pair.
+
+.. autofunction:: reconcile_isrc
+.. autoclass:: IsrcReconciler
+   :members:
+.. autoclass:: ConfirmationLog
+   :members:
+.. autoclass:: Confirmation
+   :members:
+.. autoclass:: RecordingObservation
+   :members:
+.. autofunction:: observations_from_query_result
+.. autofunction:: recording_ids_from_query
+.. autoclass:: IsrcReconciliationError
+.. autoclass:: ConfirmationConflict
+
 .. _caa_api:
 
 Cover Art

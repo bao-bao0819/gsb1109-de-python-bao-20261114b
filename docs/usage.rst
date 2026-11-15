@@ -84,6 +84,44 @@ with adding `includes` and you filter releases and release_groups::
    If you want to fetch all release groups you will have to
    `browse <browsing>`_.
 
+ISRC Reconciliation
+^^^^^^^^^^^^^^^^^^^
+
+:func:`musicbrainzngs.get_recordings_by_isrc` can legitimately return more
+than one recording for the same ISRC.  Keep that raw result and record what
+has actually been confirmed about the recordings::
+
+  result = musicbrainzngs.get_recordings_by_isrc("USAAA0000001",
+                                                 includes=["artist-credits"])
+
+  resolved = musicbrainzngs.reconcile_isrc(
+      "USAAA0000001", result,
+      observations=musicbrainzngs.observations_from_query_result(
+          result, "musicbrainz"),
+      confirmations=[
+          ("recording-a", "recording-b", musicbrainzngs.ALIAS),
+          ("recording-b", "recording-c", musicbrainzngs.COMPATIBLE),
+          ("recording-d", "recording-e", musicbrainzngs.MUTUALLY_EXCLUSIVE),
+      ])
+
+The returned dict keeps ``resolved["raw"]`` (the untouched lookup response
+and its ISRC-to-recording links) for later review.  ``merged-groups`` lists
+the groups that may be merged, with the alias chains and compatible edges
+that justify each merge.  ``quarantined-recording-ids`` lists only the
+recordings that are part of an explicit exclusion; an unrelated recording
+that merely shares an artist name is never quarantined.
+
+Alias evidence is transitive, so an alias chain can carry a merge across
+several recordings.  Compatible evidence is not transitive: it merges only
+the confirmed pair, and a second compatible edge is reported in
+``review-items`` instead of silently extending the group.  When a merge
+would span an exclusion (directly or through alias chains),
+``review-items`` reports the compatible edge together with the alias chains
+that need a human check.  Different lengths and artist lists reported by
+different sources are collected in ``observation-summary`` and
+``observation-diffs``; they are evidence for the reviewer, not a decision
+rule.
+
 Cover Art Data
 ^^^^^^^^^^^^^^
 
