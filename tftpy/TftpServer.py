@@ -17,6 +17,7 @@ from .TftpContexts import TftpContextServer
 from .TftpPacketFactory import TftpPacketFactory
 from .TftpPacketTypes import *
 from .TftpShared import *
+from .transfer_trace import TransferTracer
 
 log = logging.getLogger("tftpy.TftpServer")
 
@@ -41,7 +42,8 @@ class TftpServer(TftpSession):
     on any real files being read or written in the upload/download."""
 
     def __init__(self, tftproot="/tftpboot",
-                 dyn_file_func=None, upload_open=None, flock=True):
+                 dyn_file_func=None, upload_open=None, flock=True,
+                 trace_dir=None):
         self.listenip = None
         self.listenport = None
         self.sock = None
@@ -49,6 +51,9 @@ class TftpServer(TftpSession):
         self.root = os.path.abspath(tftproot)
         self.dyn_file_func = dyn_file_func
         self.upload_open = upload_open
+        # When set, every accepted session writes a JSONL packet trace here
+        # for offline alignment with the client-side trace.
+        self.trace_dir = trace_dir
         # A dict of sessions, where each session is keyed by a string like
         # ip:tid for the remote end.
         self.sessions = {}
@@ -174,6 +179,17 @@ class TftpServer(TftpSession):
 
                     if key not in self.sessions:
                         log.debug("Creating new server context for session key = %s" % key)
+                        tracer = None
+                        if self.trace_dir:
+                            safe_key = key.replace(":", "_").replace("/", "_")
+                            trace_path = os.path.join(
+                                self.trace_dir,
+                                f"tftp-server-{safe_key}-{int(time.time())}.jsonl"
+                            )
+                            tracer = TransferTracer(
+                                trace_path, role="server", session=key
+                            )
+                            log.info("Writing session trace to %s" % trace_path)
                         self.sessions[key] = TftpContextServer(
                             raddress,
                             rport,
@@ -182,8 +198,13 @@ class TftpServer(TftpSession):
                             self.dyn_file_func,
                             self.upload_open,
                             retries=retries,
+                            tracer=tracer,
                         )
                         try:
+                            initial_pkt = tftp_factory.parse(buffer)
+                            self.sessions[key].trace(
+                                "rx", initial_pkt,
+                                note=f"from {raddress}:{rport}")
                             self.sessions[key].start(buffer)
                         except TftpTimeoutExpectACK:
                             self.sessions[key].timeout_expectACK = True

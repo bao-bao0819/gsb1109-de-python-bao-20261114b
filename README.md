@@ -164,5 +164,32 @@ See COPYING in this distribution.
 - Only 'octet' mode is supported.
 - The only options supported are blksize and tsize.
 
+## Offline diagnosis of truncated transfers
+
+For a transfer the sender reports as complete but the receiver only stored
+partially, capture structured per-packet traces on both sides and align them
+after the fact with `tftpy.offline_diag`. Tracing is opt-in and independent of
+the text log level:
+
+```
+bin/tftpy_client.py --trace client.jsonl --upload name -i name ...
+bin/tftpy_server.py --root /tftpboot --trace-dir /var/log/tftp/ ...
+
+python -m tftpy.offline_diag \
+    --sender-trace client.jsonl \
+    --receiver-trace /var/log/tftp/tftp-server-*.jsonl \
+    --storage-file /tftpboot/name \
+    --clock-skew 2
+```
+
+The tool aligns the sender packet timeline, receiver packet timeline and
+receiver storage digest, and reports three block ranges: sent but never seen
+at the receiver, seen but never ACKed, and ACKed but missing from storage.
+Cross-side ordering is only claimed outside the supplied clock skew bound;
+inside the band no ordering (and no single-side blame) is inferred, and every
+responsibility stage still consistent with the evidence is retained with the
+exact instrumentation point to add next. Existing tftpy text logs are accepted
+in place of JSONL traces on a best-effort basis.
+
 Author:
 Michael P. Soulier <msoulier@digitaltorque.ca>

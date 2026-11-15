@@ -65,6 +65,12 @@ def main():
         default=True,
         help="disable advisory locking on files"
     )
+    parser.add_argument(
+        "--trace-dir",
+        default=None,
+        help="directory for per-session JSONL packet traces used by "
+             "tftpy.offline_diag"
+    )
     options = parser.parse_args()
 
     if options.debug:
@@ -81,7 +87,8 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    server = tftpy.TftpServer(options.root, flock=options.flock)
+    server = tftpy.TftpServer(options.root, flock=options.flock,
+                              trace_dir=options.trace_dir)
     try:
         server.listen(options.ip, options.port)
     except tftpy.TftpException as err:

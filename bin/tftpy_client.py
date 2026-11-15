@@ -101,6 +101,12 @@ def main():
         default=True,
         help="run without advisory locking on files"
     )
+    parser.add_argument(
+        "--trace",
+        default=None,
+        help="write a structured JSONL packet trace to this path for "
+             "offline alignment (tftpy.offline_diag)"
+    )
     options = parser.parse_args()
     # Handle legacy --filename argument.
     if options.filename:
@@ -147,12 +153,19 @@ def main():
     if options.tsize:
         tftp_options["tsize"] = 0
 
+    tracer = None
+    if options.trace:
+        tracer = tftpy.transfer_trace.TransferTracer(
+            options.trace, role="client"
+        )
+
     tclient = tftpy.TftpClient(
         options.host,
         int(options.port),
         tftp_options,
         options.localip,
-        flock=options.flock
+        flock=options.flock,
+        tracer=tracer,
     )
     try:
         if options.download:
@@ -176,6 +189,9 @@ def main():
         sys.exit(1)
     except KeyboardInterrupt:
         pass
+    finally:
+        if tracer is not None:
+            tracer.close()
 
 
 if __name__ == "__main__":

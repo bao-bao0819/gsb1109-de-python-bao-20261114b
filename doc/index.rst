@@ -54,6 +54,48 @@ The simplest tftp server::
 
 See the sample client and server for slightly more complex examples.
 
+Offline transfer diagnosis
+==========================
+When a transfer is reported complete on the sender but the receiver only
+stored part of the file, capture structured packet traces on both peers and
+align them offline. Traces are independent of the text log level and carry
+both a wall clock and a monotonic timestamp.
+
+Enable tracing (no tracing happens unless a target is supplied)::
+
+    bin/tftpy_client.py --trace client.jsonl --upload name -i name ...
+    bin/tftpy_server.py --root /tftpboot --trace-dir /var/log/tftp/ ...
+
+Then build the receiver storage digest and run the alignment tool. The clock
+skew bound must cover the worst-case difference between the two host clocks
+(including NTP and timezone uncertainty)::
+
+    python -m tftpy.offline_diag \
+        --sender-trace client.jsonl \
+        --receiver-trace /var/log/tftp/tftp-server-*.jsonl \
+        --storage-file /tftpboot/name \
+        --expected-size 1048576 \
+        --clock-skew 2 \
+        --format text
+
+The tool never opens a socket and never modifies the transferred file. It
+reports three block ranges:
+
+* **SENT_NOT_SEEN** - DAT blocks the sender transmitted with no receive event
+  at the receiver.
+* **SEEN_NOT_ACKED** - DAT blocks the receiver observed but for which the
+  sender has no ACK receive event.
+* **ACKED_NOT_STORED** - confirmed data blocks that the receiver storage
+  digest cannot account for (empty terminal DAT and control ACK 0 excluded).
+
+Cross-side ordering is only asserted when a timestamp difference exceeds the
+skew band; differences inside the band are reported as
+``indeterminate-in-skew-band`` and are never used, on their own, to blame one
+peer. Where the evidence cannot narrow the fault to a single stage, every
+stage still consistent with the observations is retained, each with the exact
+file, function and fields to instrument next. Existing tftpy text logs can be
+passed in place of JSONL traces and are parsed on a best-effort basis.
+
 API Documentation
 =================
 
@@ -110,5 +152,17 @@ The `TftpContexts` Module
 The `TftpStates` Module
 ~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: tftpy.TftpStates
+   :members:
+   :show-inheritance:
+
+The `transfer_trace` Module
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: tftpy.transfer_trace
+   :members:
+   :show-inheritance:
+
+The `offline_diag` Module
+~~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: tftpy.offline_diag
    :members:
    :show-inheritance:

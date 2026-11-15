@@ -25,7 +25,8 @@ class TftpClient(TftpSession):
     using advisory locking.
     """
 
-    def __init__(self, host, port=69, options={}, localip="", flock=True):
+    def __init__(self, host, port=69, options={}, localip="", flock=True,
+                 tracer=None):
         TftpSession.__init__(self)
         self.context = None
         self.host = host
@@ -34,6 +35,8 @@ class TftpClient(TftpSession):
         self.options = options
         self.localip = localip
         self.flock = flock
+        # Optional tftpy.transfer_trace.TransferTracer for offline diagnosis.
+        self.tracer = tracer
         if "blksize" in self.options:
             size = self.options["blksize"]
             tftpassert(isinstance(size, int), "blksize must be an int")
@@ -77,7 +80,8 @@ class TftpClient(TftpSession):
             timeout,
             retries=retries,
             localip=self.localip,
-            flock=self.flock
+            flock=self.flock,
+            tracer=self.tracer
         )
         with self.context as c:
             c.start()
@@ -130,7 +134,8 @@ class TftpClient(TftpSession):
             timeout,
             retries=retries,
             localip=self.localip,
-            flock=self.flock
+            flock=self.flock,
+            tracer=self.tracer
         )
         with self.context as c:
             c.start()

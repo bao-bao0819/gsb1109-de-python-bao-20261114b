@@ -111,12 +111,19 @@ class TftpState:
         if NETWORK_UNRELIABILITY > 0 and random.randrange(
                 NETWORK_UNRELIABILITY) == 0:
             log.warning("Skipping DAT packet %d for testing", dat.blocknumber)
+            self.context.trace(
+                "tx", dat, note="local-drop-test-hook",
+                bytes=len(dat.data))
         else:
             log.debug("Sending DAT packet %d", dat.blocknumber)
             self.context.sock.sendto(
                 dat.encode().buffer, (self.context.host, self.context.tidport)
             )
             self.context.metrics.last_dat_time = time.time()
+            self.context.trace(
+                "tx", dat, note="dat-sent", bytes=len(dat.data),
+                next_block=self.context.next_block,
+                pending_complete=finished)
         if self.context.packethook:
             self.context.packethook(dat)
         self.context.last_pkt = dat
@@ -137,10 +144,13 @@ class TftpState:
                 NETWORK_UNRELIABILITY) == 0:
             log.warning("Skipping ACK packet %d for testing",
                         ackpkt.blocknumber)
+            self.context.trace(
+                "tx", ackpkt, note="local-drop-test-hook")
         else:
             self.context.sock.sendto(
                 ackpkt.encode().buffer, (self.context.host, self.context.tidport)
             )
+            self.context.trace("tx", ackpkt, note="ack-sent")
         self.context.last_pkt = ackpkt
 
     def sendError(self, errorcode):
@@ -184,6 +194,9 @@ class TftpState:
         self.context.sock.sendto(
             self.context.last_pkt.encode().buffer, (self.context.host, sendto_port)
         )
+        self.context.trace(
+            "tx", self.context.last_pkt, note="retransmit",
+            retry_count=self.context.retry_count)
         if self.context.packethook:
             self.context.packethook(self.context.last_pkt)
 
@@ -200,10 +213,16 @@ class TftpState:
 
             log.debug("Writing %d bytes to output file", len(pkt.data))
             self.context.fileobj.write(pkt.data)
+            self.context.trace(
+                "store", pkt, note="stored-block",
+                bytes=len(pkt.data), offset=self.context.metrics.bytes)
             self.context.metrics.bytes += len(pkt.data)
             # Check for end-of-file, any less than full data packet.
             if len(pkt.data) < self.context.getBlocksize():
                 log.info("End of file detected")
+                self.context.trace(
+                    "store", pkt, note="eof-detected",
+                    bytes=len(pkt.data))
                 return None
 
         elif pkt.blocknumber < self.context.next_block:
@@ -213,6 +232,9 @@ class TftpState:
                 raise TftpException("There is no block zero!")
             log.warning("Dropping duplicate block %d" % pkt.blocknumber)
             self.context.metrics.add_dup(pkt)
+            self.context.trace(
+                "trace", pkt, note="duplicate-block",
+                expected=self.context.next_block)
             log.debug("ACKing block %d again, just in case", pkt.blocknumber)
             self.sendACK(pkt.blocknumber)
 
@@ -223,6 +245,9 @@ class TftpState:
                 self.context.next_block,
             )
             log.error(msg)
+            self.context.trace(
+                "trace", pkt, note="future-block",
+                expected=self.context.next_block)
             raise TftpException(msg)
 
         # Default is to ack

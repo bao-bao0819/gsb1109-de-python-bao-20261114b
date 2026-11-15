@@ -86,7 +86,8 @@ class TftpContext:
     """The base class of the contexts."""
 
     def __init__(self, host, port, timeout,
-                 retries=DEF_TIMEOUT_RETRIES, localip="", flock=True):
+                 retries=DEF_TIMEOUT_RETRIES, localip="", flock=True,
+                 tracer=None):
         """Constructor for the base context, setting shared instance
         variables."""
         log.debug("TftpContext.__init__")
@@ -94,6 +95,9 @@ class TftpContext:
         self.fileobj = None
         self.options = None
         self.packethook = None
+        # Optional TransferTracer for structured per-packet diagnosis. When
+        # None every tracing call is a cheap no-op.
+        self.tracer = tracer
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         if localip != "":
             self.sock.bind((localip, 0))
@@ -143,6 +147,24 @@ class TftpContext:
         """Fetch the current blocksize for this session."""
         return int(self.options.get("blksize", 512))
 
+    def trace(self, direction, pkt, note=None, **extra):
+        """Emit a structured trace event for a packet if a tracer is
+        attached. No-op otherwise, so default runs are unaffected."""
+        if self.tracer is None:
+            return
+        block = getattr(pkt, "blocknumber", None)
+        size = None
+        if getattr(pkt, "buffer", None) is not None:
+            size = len(pkt.buffer)
+        self.tracer.event(
+            direction,
+            pkt.__class__.__name__.replace("TftpPacket", ""),
+            block=block,
+            size=size,
+            note=note,
+            **extra
+        )
+
     def checkTimeout(self, now):
         """Compare current time with last_update time, and raise an exception
         if we're over the timeout time."""
@@ -161,12 +183,28 @@ class TftpContext:
         destructor.
         Set close_fileobj to False so fileobj can be returned open."""
         log.debug("in TftpContext.end - closing socket")
+        if self.tracer is not None:
+            final_size = None
+            try:
+                if self.fileobj is not None and not self.fileobj.closed:
+                    final_size = self.fileobj.tell()
+            except OSError:
+                final_size = None
+            self.tracer.event(
+                "trace", "CLOSE", note="session-end",
+                next_block=self.next_block,
+                errors=self.metrics.errors,
+                dupcount=self.metrics.dupcount,
+                final_size=final_size,
+            )
         self.sock.close()
         if close_fileobj and self.fileobj is not None and not self.fileobj.closed:
             log.debug("self.fileobj is open - closing")
             if self.flock:
                 lockfile(self.fileobj, unlock=True)
             self.fileobj.close()
+        if self.tracer is not None:
+            self.tracer.close()
 
     def gethost(self):
         """
@@ -213,6 +251,7 @@ class TftpContext:
 
         # Decode it.
         recvpkt = self.factory.parse(buffer)
+        self.trace("rx", recvpkt, note=f"from {raddress}:{rport}")
 
         # Check for known "connection".
         if raddress != self.address:
@@ -220,6 +259,7 @@ class TftpContext:
                 "Received traffic from %s, expected host %s. Discarding"
                 % (raddress, self.host)
             )
+            self.trace("trace", recvpkt, note="discarded-wrong-host")
 
         if self.tidport and self.tidport != rport:
             log.warning(
@@ -227,6 +267,7 @@ class TftpContext:
                 "connected to %s:%s. Discarding."
                 % (raddress, rport, self.host, self.tidport)
             )
+            self.trace("trace", recvpkt, note="discarded-wrong-tid")
 
         # If there is a packethook defined, call it. We unconditionally
         # pass all packets, it's up to the client to screen out different
@@ -254,10 +295,12 @@ class TftpContextServer(TftpContext):
         dyn_file_func=None,
         upload_open=None,
         retries=DEF_TIMEOUT_RETRIES,
-        flock=True
+        flock=True,
+        tracer=None
     ):
         log.debug("TftpContextServer.__init__")
-        super().__init__(host, port, timeout, retries, flock=flock)
+        super().__init__(host, port, timeout, retries, flock=flock,
+                         tracer=tracer)
         # At this point we have no idea if this is a download or an upload. We
         # need to let the start state determine that.
         self.state = TftpStateServerStart(self)
@@ -317,10 +360,12 @@ class TftpContextClientUpload(TftpContext):
         timeout,
         retries=DEF_TIMEOUT_RETRIES,
         localip="",
-        flock=True
+        flock=True,
+        tracer=None
     ):
         log.debug("TftpContextClientUpload.__init__")
-        super().__init__(host, port, timeout, retries, localip=localip, flock=flock)
+        super().__init__(host, port, timeout, retries, localip=localip,
+                         flock=flock, tracer=tracer)
         self.file_to_transfer = filename
         self.options = options
         self.packethook = packethook
@@ -367,6 +412,7 @@ class TftpContextClientUpload(TftpContext):
         pkt.mode = "octet"  # FIXME - shouldn't hardcode this
         pkt.options = self.options
         self.sock.sendto(pkt.encode().buffer, (self.host, self.port))
+        self.trace("tx", pkt, note="wrq-sent")
         self.next_block = 1
         self.last_pkt = pkt
         # FIXME: should we centralize sendto operations so we can refactor all
@@ -411,10 +457,12 @@ class TftpContextClientDownload(TftpContext):
         timeout,
         retries=DEF_TIMEOUT_RETRIES,
         localip="",
-        flock=True
+        flock=True,
+        tracer=None
     ):
         log.debug("TftpContextClientDownload.__init__")
-        super().__init__(host, port, timeout, retries, localip=localip, flock=flock)
+        super().__init__(host, port, timeout, retries, localip=localip,
+                         flock=flock, tracer=tracer)
         # FIXME: should we refactor setting of these params?
         self.file_to_transfer = filename
         self.options = options
@@ -465,6 +513,7 @@ class TftpContextClientDownload(TftpContext):
         pkt.mode = "octet"  # FIXME - shouldn't hardcode this
         pkt.options = self.options
         self.sock.sendto(pkt.encode().buffer, (self.host, self.port))
+        self.trace("tx", pkt, note="rrq-sent")
         self.next_block = 1
         self.last_pkt = pkt
 
