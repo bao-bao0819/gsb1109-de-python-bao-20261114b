@@ -141,3 +141,10 @@ Exceptions
 .. automodule:: ufoLib2.errors
    :members:
    :undoc-members:
+
+Offline Package Planning
+------------------------
+
+.. automodule:: ufoLib2.packing
+   :members:
+   :undoc-members:
