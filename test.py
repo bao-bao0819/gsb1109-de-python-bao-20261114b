@@ -3025,6 +3025,185 @@ class PgnTestCase(unittest.TestCase):
         game = chess.pgn.read_game(io.StringIO(pgn)).accept(BlackVariationsOnly())
         self.assertEqual(game.accept(chess.pgn.StringExporter(headers=False)), expected_pgn)
 
+    def test_position_index_keeps_castling_rights_apart(self):
+        with_castling = chess.Board("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1")
+        without_castling = chess.Board("r3k2r/8/8/8/8/8/8/R3K2R w - - 0 1")
+
+        index = chess.pgn.PositionIndex()
+        index.add(with_castling)
+
+        self.assertEqual(len(index.find(with_castling)), 1)
+        self.assertEqual(index.find(without_castling), [])
+        self.assertNotEqual(chess.pgn.move_key(with_castling), chess.pgn.move_key(without_castling))
+        self.assertNotEqual(chess.pgn.position_key(with_castling), chess.pgn.position_key(without_castling))
+
+    def test_position_index_keeps_en_passant_apart(self):
+        # Same piece placement, but only one position has a legal en passant
+        # capture.
+        with_ep = chess.Board("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 40")
+        without_ep = chess.Board("4k3/8/8/3pP3/8/8/8/4K3 w - - 0 40")
+
+        index = chess.pgn.PositionIndex()
+        index.add(with_ep)
+        self.assertEqual(index.find(without_ep), [])
+        self.assertIn(chess.Move.from_uci("e5d6"), with_ep.legal_moves)
+        self.assertNotIn(chess.Move.from_uci("e5d6"), without_ep.legal_moves)
+
+    def test_two_layer_index_transposition_and_claim(self):
+        # Both lines end with the same board (the initial position), but the
+        # mainline repeats it for the third time while the variation only
+        # repeats it once more.
+        pgn = io.StringIO(
+            "1. Nf3 ( 1. Na3 Nc6 2. Nb1 Nb8 ) "
+            "1... Nf6 2. Ng1 Ng8 3. Nf3 Nf6 4. Ng1 Ng8 *")
+        game = chess.pgn.read_game(pgn)
+
+        index = chess.pgn.PGNIndex.from_game(game)
+        final_board = game.end().board()
+
+        # The move layer meets at the same board.
+        move_entries = index.find(final_board)
+        self.assertEqual(len(move_entries), 4)
+        self.assertEqual({entry.claim.status for entry in move_entries},
+                         {chess.pgn.ClaimStatus.CLAIMABLE, chess.pgn.ClaimStatus.NOT_CLAIMABLE})
+
+        # The claim layer keeps both histories and their statuses apart.
+        self.assertEqual(len(index.find_claim(final_board)), 4)
+        self.assertEqual(len(index.find_claimable(final_board)), 1)
+        self.assertEqual(len(index.find_claim(final_board, status=chess.pgn.ClaimStatus.NOT_CLAIMABLE)), 3)
+        self.assertEqual(
+            [entry.move_stack for entry in move_entries],
+            [entry.move_stack for entry in index.claims.find_all(final_board)])
+
+    def test_claim_index_fen_start_unknown_vs_proven(self):
+        # The root FEN has a non-zero half-move clock, so the history before
+        # it is unavailable. Without a local repetition this is undecidable.
+        pgn = io.StringIO(textwrap.dedent("""\
+            [FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 20 11"]
+            [SetUp "1"]
+
+            1. Nf3 Nf6 2. Ng1 Ng8 *
+            """))
+        game = chess.pgn.read_game(pgn)
+        index = chess.pgn.PGNIndex.from_game(game)
+
+        for entry in (index.entries[0], index.find(game.end().board())[0]):
+            self.assertEqual(entry.claim.status, chess.pgn.ClaimStatus.UNKNOWN)
+            self.assertEqual(entry.claim.repetition_status, chess.pgn.ClaimStatus.UNKNOWN)
+            self.assertEqual(entry.claim.fifty_move_status, chess.pgn.ClaimStatus.NOT_CLAIMABLE)
+
+        # Fifty moves are decided by the FEN half-move clock, not by missing
+        # earlier moves.
+        pgn = io.StringIO(textwrap.dedent("""\
+            [FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 99 50"]
+            [SetUp "1"]
+
+            *
+            """))
+        game = chess.pgn.read_game(pgn)
+        entry = chess.pgn.PGNIndex.from_game(game).entries[0]
+        self.assertEqual(entry.claim.status, chess.pgn.ClaimStatus.CLAIMABLE)
+        self.assertEqual(entry.claim.fifty_move_status, chess.pgn.ClaimStatus.CLAIMABLE)
+        self.assertEqual(entry.claim.repetition_status, chess.pgn.ClaimStatus.UNKNOWN)
+
+    def test_fen_start_claim_proven_or_reset_by_irreversible_move(self):
+        # Missing earlier history, but the parsed moves themselves prove a
+        # threefold repetition.
+        pgn = io.StringIO(textwrap.dedent("""\
+            [FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 20 11"]
+            [SetUp "1"]
+
+            1. Nf3 Nf6 2. Ng1 Ng8 3. Nf3 Nf6 4. Ng1 Ng8 *
+            """))
+        game = chess.pgn.read_game(pgn)
+        assessment = chess.pgn.assess_claim(game.end().board())
+        self.assertEqual(assessment.status, chess.pgn.ClaimStatus.CLAIMABLE)
+        self.assertEqual(assessment.repetition_status, chess.pgn.ClaimStatus.CLAIMABLE)
+        self.assertFalse(assessment.history_known)
+
+        # A pawn move is irreversible, so all earlier positions are irrelevant
+        # and a non-claim is now provable.
+        pgn = io.StringIO(textwrap.dedent("""\
+            [FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 20 11"]
+            [SetUp "1"]
+
+            1. e4 e5 *
+            """))
+        game = chess.pgn.read_game(pgn)
+        assessment = chess.pgn.assess_claim(game.end().board())
+        self.assertEqual(assessment.status, chess.pgn.ClaimStatus.NOT_CLAIMABLE)
+        self.assertTrue(assessment.history_known)
+
+    def test_claim_rules_are_configurable(self):
+        pgn = io.StringIO("1. Nf3 Nf6 2. Ng1 Ng8 3. Nf3 Nf6 4. Ng1 Ng8 *")
+        game = chess.pgn.read_game(pgn)
+        board = game.end().board()
+
+        self.assertEqual(chess.pgn.claim_status(board), chess.pgn.ClaimStatus.CLAIMABLE)
+        self.assertEqual(
+            chess.pgn.claim_status(board, rules=chess.pgn.DrawRules(threefold_repetition=False)),
+            chess.pgn.ClaimStatus.NOT_CLAIMABLE)
+        self.assertEqual(
+            chess.pgn.claim_status(board, rules=chess.pgn.DrawRules(repetition_count=5)),
+            chess.pgn.ClaimStatus.NOT_CLAIMABLE)
+
+    def test_claim_status_string_filters_and_aggregate(self):
+        pgn = io.StringIO(
+            "1. Nf3 ( 1. Na3 Nc6 2. Nb1 Nb8 ) "
+            "1... Nf6 2. Ng1 Ng8 3. Nf3 Nf6 4. Ng1 Ng8 *")
+        game = chess.pgn.read_game(pgn)
+        index = chess.pgn.PGNIndex.from_game(game)
+        board = game.end().board()
+
+        self.assertEqual(chess.pgn.ClaimStatus.UNKNOWN, "unknown")
+        self.assertEqual(len(index.find_claim(board, status="claimable")), 1)
+        self.assertEqual(len(index.find_claim(board, status="not_claimable")), 3)
+        self.assertEqual(index.claim_status(board), chess.pgn.ClaimStatus.CLAIMABLE)
+
+    def test_fifty_moves_and_next_move_claim(self):
+        # 99 half-moves and a quiet legal move.
+        board = chess.Board("4k3/8/8/8/8/8/4P3/4K3 w - - 99 100")
+        self.assertEqual(chess.pgn.claim_status(board), chess.pgn.ClaimStatus.CLAIMABLE)
+
+        # No legal moves: the fifty-move claim does not apply.
+        board = chess.Board("7k/5Q2/6K1/8/8/8/8/8 b - - 99 100")
+        assessment = chess.pgn.assess_claim(board)
+        self.assertEqual(assessment.fifty_move_status, chess.pgn.ClaimStatus.NOT_CLAIMABLE)
+
+        # A pawn move on the next ply is zeroing, so it cannot reach 100.
+        board = chess.Board("4k3/8/8/8/8/4P3/8/4K3 w - - 98 100")
+        assessment = chess.pgn.assess_claim(board, rules=chess.pgn.DrawRules(fifty_moves=False))
+        self.assertEqual(assessment.fifty_move_status, chess.pgn.ClaimStatus.NOT_CLAIMABLE)
+        self.assertEqual(assessment.repetition_status, chess.pgn.ClaimStatus.UNKNOWN)
+
+        # The next-move extension can be disabled.
+        board = chess.Board("4k3/8/8/8/8/8/4P3/4K3 w - - 99 100")
+        assessment = chess.pgn.assess_claim(board, rules=chess.pgn.DrawRules(claim_by_next_move=False))
+        self.assertEqual(assessment.fifty_move_status, chess.pgn.ClaimStatus.NOT_CLAIMABLE)
+
+    def test_claim_rules_can_disable_all(self):
+        board = chess.Board("4k3/8/8/8/8/8/4P3/4K3 w - - 120 100")
+        assessment = chess.pgn.assess_claim(board, rules=chess.pgn.DrawRules(threefold_repetition=False, fifty_moves=False))
+        self.assertEqual(assessment.status, chess.pgn.ClaimStatus.NOT_CLAIMABLE)
+        self.assertEqual(assessment.repetition_status, chess.pgn.ClaimStatus.NOT_CLAIMABLE)
+        self.assertEqual(assessment.fifty_move_status, chess.pgn.ClaimStatus.NOT_CLAIMABLE)
+
+    def test_index_long_game_is_iterative(self):
+        moves = " ".join(["Nf3", "Nf6", "Ng1", "Ng8"] * 300)
+        game = chess.pgn.read_game(io.StringIO("1. " + moves + " *"))
+        index = chess.pgn.PGNIndex.from_game(game)
+        self.assertEqual(len(index), 1201)
+
+    def test_index_builders(self):
+        pgn = io.StringIO("1. e4 e5 *")
+        game = chess.pgn.read_game(pgn)
+        pgn.seek(0)
+
+        self.assertEqual(len(chess.pgn.build_index(game)), 3)
+        self.assertEqual(len(chess.pgn.build_index(pgn)), 3)
+        self.assertEqual(len(chess.pgn.PGNIndex.from_game(game).moves), 3)
+        self.assertEqual(len(chess.pgn.PGNIndex.from_game(game).claims), 3)
+
     def test_utf8_bom(self):
         not_utf8_sig = "utf-8"
         with open("data/pgn/utf8-bom.pgn", encoding=not_utf8_sig) as pgn:

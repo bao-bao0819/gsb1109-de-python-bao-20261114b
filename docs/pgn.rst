@@ -98,6 +98,110 @@ like ``!``, ``?``, ``!!``, etc., are also converted to NAGs.
 .. autodata:: chess.pgn.NAG_SPECULATIVE_MOVE
 .. autodata:: chess.pgn.NAG_DUBIOUS_MOVE
 
+Position indexing
+-----------------
+
+Opening databases commonly merge game-tree nodes when the piece placement is
+identical. That is not sufficient for two positions that only *look* the same:
+castling rights, en passant possibilities and previous moves can all differ.
+
+:class:`~chess.pgn.PGNIndex` builds two independent layers while importing
+PGN:
+
+* :attr:`~chess.pgn.PGNIndex.moves` (or
+  :attr:`~chess.pgn.PGNIndex.by_moves`) answers queries by the set of
+  currently legal moves. Positions with the same placement but different
+  castling or en passant possibilities have different legal move sets and do
+  not meet here.
+* :attr:`~chess.pgn.PGNIndex.claims` (or
+  :attr:`~chess.pgn.PGNIndex.by_claim`) answers queries by repetition identity
+  and draw-claim eligibility under configurable
+  :class:`~chess.pgn.DrawRules`.
+
+>>> import io
+>>> import chess.pgn
+>>>
+>>> pgn = io.StringIO(
+...     "1. Nf3 ( 1. Na3 Nc6 2. Nb1 Nb8 ) "
+...     "1... Nf6 2. Ng1 Ng8 3. Nf3 Nf6 4. Ng1 Ng8 *")
+>>> game = chess.pgn.read_game(pgn)
+>>> index = chess.pgn.PGNIndex.from_game(game)
+>>>
+>>> # Both lines transpose to the same piece placement.
+>>> final_board = game.end().board()
+>>> all(entry.board.board_fen() == final_board.board_fen()
+...     for entry in index.find(final_board))
+True
+>>>
+>>> # The mainline allows a threefold-repetition claim, the shorter
+>>> # variation does not.
+>>> sorted(entry.claim.status.value for entry in index.find_claim(final_board))
+['claimable', 'not_claimable', 'not_claimable', 'not_claimable']
+
+The move layer can also be queried by an exact move set or by a move:
+
+>>> len(index.find_by_moves(index.legal_moves(final_board)))
+4
+>>> len(index.find_move(chess.Move.from_uci("e2e4")))
+7
+
+If a database used only piece placement, two positions with different
+castling rights would incorrectly be merged. The placement helper exposes that
+coarse identity explicitly, while normal move lookups keep them apart:
+
+>>> can_castle = chess.Board("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1")
+>>> no_castling = chess.Board("r3k2r/8/8/8/8/8/8/R3K2R w - - 0 1")
+>>> castling_index = chess.pgn.PositionIndex([can_castle])
+>>> len(castling_index.find_by_placement(no_castling))
+1
+>>> len(castling_index.find(no_castling))
+0
+
+Claim assessments distinguish three outcomes:
+
+* :data:`~chess.pgn.ClaimStatus.CLAIMABLE`: the claim is proven by the
+  available move history (including a claim available on the next legal move).
+* :data:`~chess.pgn.ClaimStatus.NOT_CLAIMABLE`: the claim is proven not to be
+  available.
+* :data:`~chess.pgn.ClaimStatus.UNKNOWN`: the available history is
+  insufficient. In particular, when a game starts from a FEN with a non-zero
+  half-move clock and no later irreversible move, earlier repetitions may be
+  missing. The fifty-move rule remains decidable from the FEN's half-move
+  clock, but repetition claims are reported as unknown unless one is already
+  proven locally.
+
+.. autoclass:: chess.pgn.PGNIndex
+    :members:
+
+.. autoclass:: chess.pgn.PositionIndex
+    :members:
+
+.. autoclass:: chess.pgn.ClaimIndex
+    :members:
+
+.. autoclass:: chess.pgn.IndexEntry
+    :members:
+
+.. autoclass:: chess.pgn.DrawRules
+
+.. autoclass:: chess.pgn.ClaimAssessment
+
+.. autoclass:: chess.pgn.ClaimStatus
+
+.. autofunction:: chess.pgn.build_index
+
+.. autofunction:: chess.pgn.assess_claim
+
+.. autofunction:: chess.pgn.move_key
+
+.. autofunction:: chess.pgn.position_key
+
+The two layers are also available through dedicated, optional imports:
+
+>>> import chess.index
+>>> chess.index.PGNIndex is chess.pgn.PGNIndex
+True
+
 Skimming
 --------
 

@@ -1,6 +1,19 @@
 Changelog for python-chess
 ==========================
 
+Unreleased
+----------
+
+New features:
+
+* Add two-layer PGN position indexing. ``chess.pgn.PGNIndex`` provides a move
+  layer keyed by the currently legal move set and a claim layer keyed by
+  repetition identity plus repetition/fifty-move claim eligibility. The two
+  layers keep castling and en passant differences apart and allow lines that
+  transpose to the same placement to retain distinct draw-claim histories.
+  Claim assessments distinguish proven claimable, proven not claimable and
+  unknown when a FEN start omits earlier reversible history.
+
 New in v1.11.2 (25th Feb 2025)
 ------------------------------
 

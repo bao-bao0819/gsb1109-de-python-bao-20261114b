@@ -5,6 +5,7 @@ import dataclasses
 import enum
 import itertools
 import logging
+import os
 import re
 import typing
 
@@ -12,7 +13,7 @@ import chess
 import chess.engine
 import chess.svg
 
-from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Literal, Mapping, MutableMapping, Set, TextIO, Tuple, Type, TypeVar, Optional, Union
+from typing import Any, Callable, Dict, Generic, Hashable, Iterable, Iterator, List, Literal, Mapping, MutableMapping, Set, TextIO, Tuple, Type, TypeVar, Optional, Union
 from chess import Color, Square
 
 if typing.TYPE_CHECKING:
@@ -932,6 +933,36 @@ class Game(GameNode):
         """
         time_control_header = self.headers.get("TimeControl", "")
         return parse_time_control(time_control_header)
+
+    def build_index(self, *, rules: Any = None, **kwargs: Any) -> "PGNIndex":
+        """Builds a two-layer :class:`PGNIndex` for this game."""
+        return PGNIndex.from_game(self, rules=rules, **kwargs)
+
+    build_pgn_index = build_index
+
+    @property
+    def pgn_index(self) -> "PGNIndex":
+        return self.build_index()
+
+    @property
+    def index(self) -> "PGNIndex":
+        return self.build_index()
+
+    @property
+    def position_index(self) -> "PositionIndex":
+        return self.build_index().moves
+
+    @property
+    def moves_index(self) -> "PositionIndex":
+        return self.build_index().moves
+
+    @property
+    def claim_index(self) -> "ClaimIndex":
+        return self.build_index().claims
+
+    @property
+    def draw_index(self) -> "ClaimIndex":
+        return self.build_index().claims
 
     @classmethod
     def from_board(cls: Type[GameT], board: chess.Board) -> GameT:
@@ -1914,3 +1945,1436 @@ def parse_time_control(time_control: str) -> TimeControl:
         tc.type = TimeControlType.STANDARD
 
     return tc
+
+
+# Position and draw-claim indexing
+# --------------------------------
+#
+# An opening database often merges game-tree nodes just because the pieces are
+# arranged in the same way. That is not enough: castling rights, an en passant
+# square and the history of a game can all change what is available or can be
+# claimed. The following two indexes deliberately keep those aspects apart.
+#
+# * The move index uses the set of legal moves as its key. Two nodes with the
+#   same piece placement but different castling or en passant possibilities do
+#   not match, because their legal move sets differ.
+# * The claim index keeps the repetition identity of a position together with
+#   its claim status under a configurable set of draw rules. Two lines may
+#   transpose to the same piece placement (or even the same position in the
+#   repetition sense) and still have different claim statuses.
+
+
+class ClaimStatus(str, enum.Enum):
+    """The result of assessing a draw claim.
+
+    Values compare equal to their lowercase string form (for example,
+    ``ClaimStatus.UNKNOWN == "unknown"``).
+    """
+
+    def __str__(self) -> str:
+        return self.value
+
+    NOT_CLAIMABLE = "not_claimable"
+    """The draw cannot be claimed under the given rules."""
+
+    CLAIMABLE = "claimable"
+    """The draw can be proven to be claimable."""
+
+    UNKNOWN = "unknown"
+    """
+    The available history is insufficient to decide whether the draw can be
+    claimed. This happens, for example, when a game starts from a FEN with a
+    non-zero half-move clock and the moves before that FEN are unavailable.
+    """
+
+    # More explicit aliases for readability at call sites.
+    PROVEN_NOT_CLAIMABLE = "not_claimable"
+    PROVEN_CLAIMABLE = "claimable"
+    UNDECIDABLE = "unknown"
+    CANNOT_DETERMINE = "unknown"
+    PROVEN = "claimable"
+    NOT_PROVEN = "not_claimable"
+    INDETERMINATE = "unknown"
+
+
+DrawClaim = ClaimStatus
+DrawClaimResult = ClaimStatus
+ClaimState = ClaimStatus
+
+CLAIMABLE = ClaimStatus.CLAIMABLE
+NOT_CLAIMABLE = ClaimStatus.NOT_CLAIMABLE
+UNKNOWN = ClaimStatus.UNKNOWN
+PROVEN = ClaimStatus.CLAIMABLE
+UNDECIDABLE = ClaimStatus.UNKNOWN
+
+
+def _coerce_claim_status(status: Any) -> Optional[ClaimStatus]:
+    if status is None:
+        return None
+    return status if isinstance(status, ClaimStatus) else ClaimStatus(status)
+
+
+@dataclasses.dataclass(frozen=True, init=False)
+class DrawRules:
+    """
+    Configures which draw claims are considered.
+
+    :param threefold_repetition: Consider repetition claims.
+    :param fifty_moves: Consider fifty-move claims.
+    :param repetition_count: Number of occurrences needed for a repetition
+        claim (3 by default). The claim may also be made when the next legal
+        move reaches this number.
+    :param halfmove_limit: Number of half-moves without a pawn move or capture
+        needed for a fifty-move claim (100 by default). As with the standard
+        rule, a claim may also be made when the next legal move reaches it.
+    :param claim_by_next_move: Whether a claim may be made when the next legal
+        move would fulfil the condition.
+    """
+
+    threefold_repetition: bool
+    fifty_moves: bool
+    repetition_count: int
+    halfmove_limit: int
+    claim_by_next_move: bool
+
+    def __init__(
+            self,
+            threefold_repetition: bool = True,
+            fifty_moves: bool = True,
+            repetition_count: int = 3,
+            halfmove_limit: int = 100,
+            claim_by_next_move: bool = True,
+            **aliases: Any) -> None:
+        # Accept a few natural spellings without making the public signature
+        # unwieldy. Unknown keyword arguments are rejected by the final checks.
+        if "threefold" in aliases:
+            threefold_repetition = aliases.pop("threefold")
+        if "repetition" in aliases:
+            threefold_repetition = aliases.pop("repetition")
+        if "fifty" in aliases:
+            fifty_moves = aliases.pop("fifty")
+        if "fifty_move_rule" in aliases:
+            fifty_moves = aliases.pop("fifty_move_rule")
+        if "claim_by_advance" in aliases:
+            claim_by_next_move = aliases.pop("claim_by_advance")
+        if aliases:
+            raise TypeError(f"unexpected draw rule arguments: {', '.join(sorted(aliases))}")
+
+        if repetition_count < 1:
+            raise ValueError("repetition_count must be positive")
+        if halfmove_limit < 1:
+            raise ValueError("halfmove_limit must be positive")
+
+        object.__setattr__(self, "threefold_repetition", bool(threefold_repetition))
+        object.__setattr__(self, "fifty_moves", bool(fifty_moves))
+        object.__setattr__(self, "repetition_count", int(repetition_count))
+        object.__setattr__(self, "halfmove_limit", int(halfmove_limit))
+        object.__setattr__(self, "claim_by_next_move", bool(claim_by_next_move))
+
+    @property
+    def threefold(self) -> bool:
+        return self.threefold_repetition
+
+    @property
+    def repetition(self) -> bool:
+        return self.threefold_repetition
+
+    @property
+    def fifty(self) -> bool:
+        return self.fifty_moves
+
+    @property
+    def fifty_move_rule(self) -> bool:
+        return self.fifty_moves
+
+
+ClaimRules = DrawRules
+RepetitionRules = DrawRules
+DrawClaimRules = DrawRules
+
+
+DEFAULT_DRAW_RULES = DrawRules()
+DrawClaimStatus = ClaimStatus
+
+
+@dataclasses.dataclass(frozen=True)
+class ClaimAssessment:
+    """The assessment of all claim rules for one position."""
+
+    status: ClaimStatus
+    repetition_status: ClaimStatus
+    fifty_move_status: ClaimStatus
+    history_known: bool
+    """Whether the entire relevant repetition history is available."""
+
+    repetitions: int
+    """Known occurrences of the position in the current reversible segment."""
+
+    halfmove_clock: int
+
+    @property
+    def proven(self) -> bool:
+        return self.status is ClaimStatus.CLAIMABLE
+
+    @property
+    def proven_claimable(self) -> bool:
+        return self.status is ClaimStatus.CLAIMABLE
+
+    @property
+    def unknown(self) -> bool:
+        return self.status is ClaimStatus.UNKNOWN
+
+    @property
+    def determinable(self) -> bool:
+        return self.status is not ClaimStatus.UNKNOWN
+
+    @property
+    def can_claim(self) -> bool:
+        return self.status is ClaimStatus.CLAIMABLE
+
+
+ClaimResult = ClaimAssessment
+ClaimEvaluation = ClaimAssessment
+ClaimInfo = ClaimAssessment
+
+
+@dataclasses.dataclass(eq=False)
+class IndexEntry:
+    """A position stored in an index."""
+
+    node: Optional[GameNode]
+    """The game tree node, or ``None`` for a standalone board."""
+
+    board: chess.Board
+    """A snapshot of the position, including the known move history."""
+
+    position_key: Hashable
+    """The repetition identity of the position."""
+
+    move_key: Hashable
+    """The legal-move identity of the position."""
+
+    claim: ClaimAssessment
+    """The draw-claim assessment under the rules used while indexing."""
+
+    game: Optional[Game]
+    """The game this position belongs to, if any."""
+
+    @property
+    def claim_status(self) -> ClaimStatus:
+        return self.claim.status
+
+    @property
+    def status(self) -> ClaimStatus:
+        return self.claim.status
+
+    @property
+    def ply(self) -> int:
+        return self.board.ply()
+
+    @property
+    def move_stack(self) -> Tuple[chess.Move, ...]:
+        return tuple(self.board.move_stack)
+
+    @property
+    def claimable(self) -> bool:
+        return self.claim.status is ClaimStatus.CLAIMABLE
+
+    @property
+    def can_claim(self) -> bool:
+        return self.claim.status is ClaimStatus.CLAIMABLE
+
+    @property
+    def proven_claimable(self) -> bool:
+        return self.claim.status is ClaimStatus.CLAIMABLE
+
+    @property
+    def not_claimable(self) -> bool:
+        return self.claim.status is ClaimStatus.NOT_CLAIMABLE
+
+    @property
+    def unknown(self) -> bool:
+        return self.claim.status is ClaimStatus.UNKNOWN
+
+    @property
+    def history_known(self) -> bool:
+        return self.claim.history_known
+
+    @property
+    def repetitions(self) -> int:
+        return self.claim.repetitions
+
+    @property
+    def can_claim_threefold_repetition(self) -> bool:
+        return self.claim.repetition_status is ClaimStatus.CLAIMABLE
+
+    @property
+    def can_claim_fifty_moves(self) -> bool:
+        return self.claim.fifty_move_status is ClaimStatus.CLAIMABLE
+
+    @property
+    def repetition_status(self) -> ClaimStatus:
+        return self.claim.repetition_status
+
+    @property
+    def fifty_move_status(self) -> ClaimStatus:
+        return self.claim.fifty_move_status
+
+    @property
+    def fen(self) -> str:
+        return self.board.fen()
+
+    @property
+    def board_fen(self) -> str:
+        return self.board.board_fen()
+
+    @property
+    def turn(self) -> chess.Color:
+        return self.board.turn
+
+    @property
+    def halfmove_clock(self) -> int:
+        return self.board.halfmove_clock
+
+    @property
+    def legal_moves(self) -> chess.LegalMoveGenerator:
+        return self.board.legal_moves
+
+    def has_castling_rights(self, color: chess.Color) -> bool:
+        return self.board.has_castling_rights(color)
+
+    @property
+    def can_castle_kingside(self) -> bool:
+        return self.board.has_kingside_castling_rights(self.board.turn)
+
+    @property
+    def can_castle_queenside(self) -> bool:
+        return self.board.has_queenside_castling_rights(self.board.turn)
+
+    def __repr__(self) -> str:
+        return "<{} at {:#x} ({} {})>".format(
+            type(self).__name__, id(self), self.board.fen(), self.claim.status.value)
+
+
+PositionEntry = IndexEntry
+IndexedPosition = IndexEntry
+IndexRecord = IndexEntry
+MoveIndexEntry = IndexEntry
+ClaimIndexEntry = IndexEntry
+
+
+def _coerce_draw_rules(rules: Any) -> DrawRules:
+    if rules is None:
+        return DEFAULT_DRAW_RULES
+    if isinstance(rules, DrawRules):
+        return rules
+    if isinstance(rules, Mapping):
+        return DrawRules(**rules)
+    return DrawRules(
+        threefold_repetition=getattr(rules, "threefold_repetition", getattr(rules, "threefold", True)),
+        fifty_moves=getattr(rules, "fifty_moves", getattr(rules, "fifty", True)),
+        repetition_count=getattr(rules, "repetition_count", 3),
+        halfmove_limit=getattr(rules, "halfmove_limit", 100),
+        claim_by_next_move=getattr(rules, "claim_by_next_move", True))
+
+
+def _extract_rules(rules: Any, kwargs: Dict[str, Any]) -> DrawRules:
+    for name in ("draw_rules", "claim_rules", "repetition_rules", "claim_rule_set"):
+        if name in kwargs:
+            supplied = kwargs.pop(name)
+            if rules is not None:
+                raise TypeError(f"got both rules and {name}")
+            rules = supplied
+    if kwargs:
+        raise TypeError(f"unexpected keyword arguments: {', '.join(sorted(kwargs))}")
+    return _coerce_draw_rules(rules)
+
+
+def _extract_history_known(history_known: Optional[bool], kwargs: Dict[str, Any]) -> Optional[bool]:
+    for name in ("complete_history", "history_complete", "known_history"):
+        if name in kwargs:
+            supplied = kwargs.pop(name)
+            if history_known is not None:
+                raise TypeError(f"got both history_known and {name}")
+            history_known = supplied
+    if kwargs:
+        raise TypeError(f"unexpected keyword arguments: {', '.join(sorted(kwargs))}")
+    return history_known
+
+
+def placement_key(board: chess.Board) -> Hashable:
+    """
+    Returns a key based only on the piece placement and side to move.
+
+    This is the identity a naive opening database might use. It intentionally
+    ignores castling rights, en passant and move history, which is why the
+    move and claim layers in this module do not use it for lookups.
+    """
+    return (type(board).__module__, type(board).__qualname__, board.board_fen(), board.turn)
+
+
+piece_placement_key = placement_key
+placement_only_key = placement_key
+board_fen_key = placement_key
+
+
+def position_key(board: chess.Board) -> Hashable:
+    """
+    Returns the repetition identity of a position.
+
+    Unlike :func:`move_key`, this includes castling rights and a legal en
+    passant square, but not the half-move clock or move number.
+    """
+    return (type(board).__module__, type(board).__qualname__, board._transposition_key())
+
+
+transposition_key = position_key
+repetition_key = position_key
+board_position_key = position_key
+
+
+def move_key(board: chess.Board) -> Hashable:
+    """
+    Returns the legal-move identity of a position.
+
+    The key contains the piece placement, side to move and the complete set of
+    currently legal moves. Two positions with the same placement but different
+    castling or en passant possibilities therefore have different keys.
+    """
+    moves = tuple(sorted(move.uci() for move in board.generate_legal_moves()))
+    return (
+        type(board).__module__,
+        type(board).__qualname__,
+        board.board_fen(),
+        board.turn,
+        moves,
+    )
+
+
+legal_move_key = move_key
+moves_key = move_key
+position_move_key = move_key
+legal_moves_key = move_key
+available_moves_key = move_key
+
+
+def _move_uci(move: Union[chess.Move, str]) -> str:
+    return move if isinstance(move, str) else move.uci()
+
+
+def moves_key_from_moves(moves: Iterable[Union[chess.Move, str]]) -> Tuple[str, ...]:
+    """Returns the canonical legal-move part used by :func:`move_key`."""
+    return tuple(sorted(_move_uci(move) for move in moves))
+
+
+def _known_repetition_count(board: chess.Board, key: Optional[Hashable] = None) -> int:
+    if key is None:
+        key = board._transposition_key()
+
+    count = 1
+    replayed = board.copy(stack=True)
+    while replayed.move_stack:
+        move = replayed.pop()
+        if replayed.is_irreversible(move):
+            break
+        if replayed._transposition_key() == key:
+            count += 1
+    return count
+
+
+def _history_known_for_repetition(board: chess.Board) -> bool:
+    """
+    Checks whether all positions that can still be relevant for repetition
+    are on the move stack.
+
+    Starting from a FEN with a zero half-move clock is safe: the last move
+    before the FEN was irreversible, so earlier positions cannot repeat any
+    position from the current reversible segment. After any irreversible move
+    the same is true again.
+    """
+    root = board.root()
+    if root.halfmove_clock == 0:
+        return True
+
+    replayed = root.copy(stack=False)
+    for move in board.move_stack:
+        if replayed.is_irreversible(move):
+            return True
+        replayed.push(move)
+    return False
+
+
+def _claim_by_next_move_repetition(board: chess.Board, key: Hashable, count: int) -> bool:
+    for move in board.generate_legal_moves():
+        board.push(move)
+        try:
+            if _known_repetition_count(board, board._transposition_key()) >= count:
+                return True
+        finally:
+            board.pop()
+    return False
+
+
+def _repetition_claimable(board: chess.Board, rules: DrawRules) -> bool:
+    key = board._transposition_key()
+    count = _known_repetition_count(board, key)
+    if count >= rules.repetition_count:
+        return True
+    if rules.claim_by_next_move:
+        return _claim_by_next_move_repetition(board, key, rules.repetition_count)
+    return False
+
+
+def _fifty_move_claimable(board: chess.Board, rules: DrawRules) -> bool:
+    if board.halfmove_clock >= rules.halfmove_limit:
+        return any(board.generate_legal_moves())
+
+    if rules.claim_by_next_move and board.halfmove_clock >= rules.halfmove_limit - 1:
+        for move in board.generate_legal_moves():
+            if board.is_zeroing(move):
+                continue
+            board.push(move)
+            try:
+                if board.halfmove_clock >= rules.halfmove_limit and any(board.generate_legal_moves()):
+                    return True
+            finally:
+                board.pop()
+    return False
+
+
+def _make_claim_assessment(board: chess.Board, rules: DrawRules, history_known: bool, repetitions: int, repetition_claimable: bool) -> ClaimAssessment:
+    if not rules.threefold_repetition:
+        repetition_status = ClaimStatus.NOT_CLAIMABLE
+    elif repetition_claimable:
+        repetition_status = ClaimStatus.CLAIMABLE
+    elif history_known:
+        repetition_status = ClaimStatus.NOT_CLAIMABLE
+    else:
+        repetition_status = ClaimStatus.UNKNOWN
+
+    fifty_claimable = _fifty_move_claimable(board, rules)
+    if not rules.fifty_moves:
+        fifty_status = ClaimStatus.NOT_CLAIMABLE
+    else:
+        fifty_status = ClaimStatus.CLAIMABLE if fifty_claimable else ClaimStatus.NOT_CLAIMABLE
+
+    active = []
+    if rules.threefold_repetition:
+        active.append(repetition_status)
+    if rules.fifty_moves:
+        active.append(fifty_status)
+
+    if ClaimStatus.CLAIMABLE in active:
+        status = ClaimStatus.CLAIMABLE
+    elif ClaimStatus.UNKNOWN in active:
+        status = ClaimStatus.UNKNOWN
+    else:
+        status = ClaimStatus.NOT_CLAIMABLE
+
+    return ClaimAssessment(
+        status=status,
+        repetition_status=repetition_status,
+        fifty_move_status=fifty_status,
+        history_known=history_known,
+        repetitions=repetitions,
+        halfmove_clock=board.halfmove_clock)
+
+
+def assess_claim(board: chess.Board, *, rules: Any = None, history_known: Optional[bool] = None, **kwargs: Any) -> ClaimAssessment:
+    """
+    Assesses repetition and fifty-move claims for *board*.
+
+    If *history_known* is omitted, it is inferred from the board's move stack
+    and root half-move clock. Games parsed from a FEN with a non-zero
+    half-move clock and without any later irreversible move therefore report
+    :data:`ClaimStatus.UNKNOWN` when a repetition cannot be proven locally,
+    instead of incorrectly claiming that no repetition can exist.
+    """
+    kwargs = dict(kwargs)
+    draw_rules = _extract_rules(rules, kwargs)
+    history_known = _extract_history_known(history_known, kwargs)
+    if kwargs:
+        raise TypeError(f"unexpected keyword arguments: {', '.join(sorted(kwargs))}")
+    if history_known is None:
+        history_known = _history_known_for_repetition(board)
+
+    key = board._transposition_key()
+    repetitions = _known_repetition_count(board, key)
+    return _make_claim_assessment(
+        board, draw_rules, history_known, repetitions,
+        _repetition_claimable(board, draw_rules))
+
+
+def claim_status(board: chess.Board, *, rules: Any = None, history_known: Optional[bool] = None, **kwargs: Any) -> ClaimStatus:
+    """Returns just the combined claim status. See :func:`assess_claim`."""
+    return assess_claim(board, rules=rules, history_known=history_known, **kwargs).status
+
+
+def can_prove_claim(board: chess.Board, *, rules: Any = None, **kwargs: Any) -> bool:
+    """Checks whether a claim is proven to be possible."""
+    return assess_claim(board, rules=rules, **kwargs).status is ClaimStatus.CLAIMABLE
+
+
+def is_claim_unknown(board: chess.Board, *, rules: Any = None, **kwargs: Any) -> bool:
+    """Checks whether the claim status cannot be determined."""
+    return assess_claim(board, rules=rules, **kwargs).status is ClaimStatus.UNKNOWN
+
+
+def claimable_or_none(board: chess.Board, *, rules: Any = None, **kwargs: Any) -> Optional[bool]:
+    """
+    Returns ``True`` if a draw claim is proven, ``False`` if it is proven
+    impossible, and ``None`` if the available history is insufficient.
+    """
+    status = assess_claim(board, rules=rules, **kwargs).status
+    if status is ClaimStatus.CLAIMABLE:
+        return True
+    if status is ClaimStatus.NOT_CLAIMABLE:
+        return False
+    return None
+
+
+evaluate_claim = assess_claim
+get_claim_status = claim_status
+claim_status_for = claim_status
+
+
+def _iter_source_games(source: Any) -> Iterator[Game]:
+    # Already-parsed game.
+    if isinstance(source, Game):
+        yield source
+        return
+
+    # Text stream.
+    if hasattr(source, "read"):
+        yield from _read_all_games(source)
+        return
+
+    # Path.
+    if isinstance(source, (str, bytes, os.PathLike)):
+        with open(source, encoding="utf-8") as handle:
+            yield from _read_all_games(handle)
+        return
+
+    # Iterable of games.
+    yield from source
+
+
+def _assess_claim_from_counts(board: chess.Board, counts: Dict[Hashable, int], history_known: bool, rules: DrawRules) -> ClaimAssessment:
+    """
+    Like :func:`assess_claim`, but uses an incrementally maintained count of
+    position keys in the current reversible segment.
+    """
+    key = board._transposition_key()
+    repetitions = counts.get(key, 0)
+
+    repetition_claimable = repetitions >= rules.repetition_count
+    if not repetition_claimable and rules.claim_by_next_move:
+        for move in board.generate_legal_moves():
+            irreversible = board.is_irreversible(move)
+            board.push(move)
+            try:
+                child_key = board._transposition_key()
+            finally:
+                board.pop()
+
+            child_count = 1 if irreversible else counts.get(child_key, 0) + 1
+            if child_count >= rules.repetition_count:
+                repetition_claimable = True
+                break
+
+    return _make_claim_assessment(board, rules, history_known, repetitions, repetition_claimable)
+
+
+def _iter_index_nodes(game: Game, rules: DrawRules) -> Iterator[Tuple[GameNode, chess.Board, ClaimAssessment]]:
+    """
+    Iterates nodes with an incrementally maintained claim assessment.
+
+    The board is only valid until the next iteration step; callers that retain
+    it must copy it.
+    """
+    board = game.board()
+    counts: Dict[Hashable, int] = {board._transposition_key(): 1}
+    history_known = board.halfmove_clock == 0
+
+    yield game, board, _assess_claim_from_counts(board, counts, history_known, rules)
+
+    # Frame: node, variations, saved counts (set after an irreversible move),
+    # saved history flag, child key and whether it was counted.
+    stack: List[Tuple[GameNode, Iterator[ChildNode], Optional[Dict[Hashable, int]], bool, Optional[Hashable], bool]] = [
+        (game, iter(game.variations), None, True, None, False)]
+
+    while stack:
+        node, variations, saved_counts, saved_known, child_key, incremented = stack[-1]
+        try:
+            child = next(variations)
+        except StopIteration:
+            stack.pop()
+            if stack:
+                board.pop()
+                if saved_counts is not None:
+                    counts = saved_counts
+                    history_known = saved_known
+                elif incremented and child_key is not None:
+                    remaining = counts.get(child_key, 0) - 1
+                    if remaining > 0:
+                        counts[child_key] = remaining
+                    else:
+                        counts.pop(child_key, None)
+            continue
+
+        irreversible = board.is_irreversible(child.move)
+        parent_counts = counts
+        parent_known = history_known
+        board.push(child.move)
+
+        if irreversible:
+            counts = {board._transposition_key(): 1}
+            history_known = True
+            counts_saved_for_child: Optional[Dict[Hashable, int]] = parent_counts
+            known_saved_for_child = parent_known
+            child_key = None
+            incremented = False
+        else:
+            counts_saved_for_child = None
+            known_saved_for_child = True
+            child_key = board._transposition_key()
+            counts[child_key] = counts.get(child_key, 0) + 1
+            incremented = True
+
+        yield child, board, _assess_claim_from_counts(board, counts, history_known, rules)
+
+        stack.append((child, iter(child.variations), counts_saved_for_child, known_saved_for_child, child_key, incremented))
+
+
+class PositionIndex:
+    """
+    Indexes PGN nodes by their currently legal moves.
+
+    This is the first of the two layers. It answers queries such as "which
+    nodes offer exactly these moves?" and intentionally does not conflate
+    positions whose piece placement is identical but whose castling or en
+    passant possibilities differ.
+    """
+
+    def __init__(self, games: Any = None, *, rules: Any = None, **kwargs: Any) -> None:
+        self.rules = _extract_rules(rules, kwargs)
+        self._entries: List[IndexEntry] = []
+        self._by_move_key: Dict[Hashable, List[IndexEntry]] = {}
+        self._by_position_key: Dict[Hashable, List[IndexEntry]] = {}
+
+        if games is not None:
+            for game in _iter_source_games(games):
+                self.add_game(game)
+
+    def add_game(self, game: Union[Game, chess.Board]) -> List[IndexEntry]:
+        """
+        Adds every node of *game*, including all variations.
+
+        For convenience, a single board is added as a standalone entry.
+        """
+        if not isinstance(game, Game):
+            return [self.add(game)]  # type: ignore[list-item]
+
+        return [self._add_node(node, game, board, claim)
+                for node, board, claim in _iter_index_nodes(game, self.rules)]
+
+    def _add_node(self, node: GameNode, game: Game, board: chess.Board, claim: Optional[ClaimAssessment] = None) -> IndexEntry:
+        entry = IndexEntry(
+            node=node,
+            board=board.copy(stack=True),
+            position_key=position_key(board),
+            move_key=move_key(board),
+            claim=claim if claim is not None else assess_claim(board, rules=self.rules),
+            game=game)
+        self._entries.append(entry)
+        self._by_move_key.setdefault(entry.move_key, []).append(entry)
+        self._by_position_key.setdefault(entry.position_key, []).append(entry)
+        return entry
+
+    def add(self, value: Union[Game, GameNode, chess.Board]) -> Union[IndexEntry, List[IndexEntry]]:
+        """Adds a game, node or standalone board."""
+        if isinstance(value, Game):
+            return self.add_game(value)  # type: ignore[return-value]
+        elif isinstance(value, GameNode):
+            return self._add_node(value, value.game(), value.board())
+        elif isinstance(value, chess.Board):
+            entry = IndexEntry(
+                node=None,
+                board=value.copy(stack=True),
+                position_key=position_key(value),
+                move_key=move_key(value),
+                claim=assess_claim(value, rules=self.rules),
+                game=None)
+            self._entries.append(entry)
+            self._by_move_key.setdefault(entry.move_key, []).append(entry)
+            self._by_position_key.setdefault(entry.position_key, []).append(entry)
+            return entry
+        else:
+            raise TypeError(f"cannot index {type(value).__name__}")
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __iter__(self) -> Iterator[IndexEntry]:
+        return iter(self._entries)
+
+    def __contains__(self, board: Union[chess.Board, Hashable]) -> bool:
+        if isinstance(board, chess.Board):
+            return move_key(board) in self._by_move_key
+        return board in self._by_move_key
+
+    def __getitem__(self, key: Union[chess.Board, Hashable]) -> List[IndexEntry]:
+        if isinstance(key, chess.Board):
+            return self.find(key)
+        return self._by_move_key[key]
+
+    def find(self, board: chess.Board) -> List[IndexEntry]:
+        """Finds entries whose current legal moves match *board*."""
+        return list(self._by_move_key.get(move_key(board), []))
+
+    lookup = find
+    find_all = find
+    find_by_board = find
+    find_by_legal_moves = find
+
+    def get(self, board: chess.Board, default: Optional[List[IndexEntry]] = None) -> Optional[List[IndexEntry]]:
+        return self._by_move_key.get(move_key(board), default)
+
+    def find_with_move(self, board: chess.Board, move: chess.Move) -> List[IndexEntry]:
+        """Finds entries matching *board* whose legal moves also include *move*."""
+        return [entry for entry in self.find(board) if move in entry.board.legal_moves]
+
+    find_by_move = find_with_move
+    find_with_move_on_board = find_with_move
+    lookup_move = find_with_move
+
+    def has_move(self, board: chess.Board, move: chess.Move) -> bool:
+        return bool(self.find_with_move(board, move))
+
+    def legal_moves(self, board: Optional[chess.Board] = None, *, key: Optional[Hashable] = None) -> Tuple[str, ...]:
+        """
+        Returns the indexed legal moves for *board*, or for a move key.
+
+        The result is the canonical tuple used internally, so it can be passed
+        back to :meth:`find_by_moves`.
+        """
+        if key is None:
+            if board is None:
+                raise TypeError("either board or key is required")
+            key = move_key(board)
+        return typing.cast(Tuple[str, ...], key[-1])
+
+    moves_for = legal_moves
+    available_moves = legal_moves
+
+    def find_move(self, move: chess.Move) -> List[IndexEntry]:
+        """Finds entries where *move* is currently legal."""
+        uci = move.uci()
+        return [entry for entry in self._entries if uci in entry.move_key[-1]]
+
+    def find_containing_move(self, move: chess.Move) -> List[IndexEntry]:
+        return self.find_move(move)
+
+    def find_positions_with_move(self, move: chess.Move) -> List[IndexEntry]:
+        return self.find_move(move)
+
+    def find_by_moves(self, moves: Iterable[Union[chess.Move, str]]) -> List[IndexEntry]:
+        """Finds entries by the complete set of legal moves (without a board)."""
+        key_moves = moves_key_from_moves(moves)
+        result = []
+        for entry in self._entries:
+            if entry.move_key[-1] == key_moves:
+                result.append(entry)
+        return result
+
+    find_moves = find_by_moves
+    find_by_move_set = find_by_moves
+
+    def find_position(self, board: chess.Board) -> List[IndexEntry]:
+        """Finds entries with the same repetition identity as *board*."""
+        return list(self._by_position_key.get(position_key(board), []))
+
+    def find_by_placement(self, board: chess.Board) -> List[IndexEntry]:
+        """
+        Finds entries by piece placement and side to move only.
+
+        This deliberately exposes the coarse identity a naive opening database
+        might use, including entries that the move layer keeps separate due to
+        castling rights or en passant.
+        """
+        key = placement_key(board)
+        return [entry for entry in self._entries if placement_key(entry.board) == key]
+
+    find_placement = find_by_placement
+    find_by_board_fen = find_by_placement
+
+    def find_by_fen(self, fen: str) -> List[IndexEntry]:
+        return self.find(chess.Board(fen))
+
+    query_fen = find_by_fen
+
+    def keys(self) -> Iterable[Hashable]:
+        return self._by_move_key.keys()
+
+    @property
+    def entries(self) -> List[IndexEntry]:
+        return list(self._entries)
+
+    @classmethod
+    def from_pgn(cls, handle: TextIO, *, rules: Any = None, **kwargs: Any) -> "PositionIndex":
+        index = cls(rules=rules, **kwargs)
+        index.add_games_from_pgn(handle)
+        return index
+
+    @classmethod
+    def from_games(cls, games: Iterable[Game], *, rules: Any = None, **kwargs: Any) -> "PositionIndex":
+        return cls(games, rules=rules, **kwargs)
+
+    def add_games_from_pgn(self, handle: TextIO) -> None:
+        while True:
+            game = read_game(handle)
+            if game is None:
+                break
+            self.add_game(game)
+
+
+MoveIndex = PositionIndex
+OpeningMoveIndex = PositionIndex
+LegalMoveIndex = PositionIndex
+MoveSetIndex = PositionIndex
+TranspositionIndex = PositionIndex
+PositionMoveIndex = PositionIndex
+AvailableMovesIndex = PositionIndex
+CurrentMovesIndex = PositionIndex
+
+
+class ClaimIndex:
+    """
+    Indexes PGN nodes by repetition identity and draw-claim status.
+
+    This is the second layer. Same-looking positions with different histories
+    stay distinguishable: each occurrence retains its own
+    :class:`ClaimAssessment`. A position started from a FEN with missing
+    reversible history can be reported as :data:`ClaimStatus.UNKNOWN` rather
+    than being confused with a proven non-claim or a proven claim.
+    """
+
+    def __init__(self, games: Any = None, *, rules: Any = None, **kwargs: Any) -> None:
+        self.rules = _extract_rules(rules, kwargs)
+        self._entries: List[IndexEntry] = []
+        self._by_position_key: Dict[Hashable, List[IndexEntry]] = {}
+        self._by_claim_key: Dict[Tuple[Hashable, ClaimStatus], List[IndexEntry]] = {}
+
+        if games is not None:
+            for game in _iter_source_games(games):
+                self.add_game(game)
+
+    def add_game(self, game: Union[Game, chess.Board]) -> List[IndexEntry]:
+        """
+        Adds every node of *game*, including all variations.
+
+        For convenience, a single board is added as a standalone entry.
+        """
+        if not isinstance(game, Game):
+            return [self.add(game)]  # type: ignore[list-item]
+
+        return [self._add_node(node, game, board, claim)
+                for node, board, claim in _iter_index_nodes(game, self.rules)]
+
+    def _add_node(self, node: GameNode, game: Game, board: chess.Board, claim: Optional[ClaimAssessment] = None) -> IndexEntry:
+        entry = IndexEntry(
+            node=node,
+            board=board.copy(stack=True),
+            position_key=position_key(board),
+            move_key=move_key(board),
+            claim=claim if claim is not None else assess_claim(board, rules=self.rules),
+            game=game)
+        self._entries.append(entry)
+        self._by_position_key.setdefault(entry.position_key, []).append(entry)
+        self._by_claim_key.setdefault((entry.position_key, entry.claim.status), []).append(entry)
+        return entry
+
+    def add(self, value: Union[Game, GameNode, chess.Board], *, history_known: Optional[bool] = None) -> Union[IndexEntry, List[IndexEntry]]:
+        if isinstance(value, Game):
+            return self.add_game(value)  # type: ignore[return-value]
+        elif isinstance(value, GameNode):
+            board = value.board()
+            return self._add_node(value, value.game(), board)
+        elif isinstance(value, chess.Board):
+            entry = IndexEntry(
+                node=None,
+                board=value.copy(stack=True),
+                position_key=position_key(value),
+                move_key=move_key(value),
+                claim=assess_claim(value, rules=self.rules, history_known=history_known),
+                game=None)
+            self._entries.append(entry)
+            self._by_position_key.setdefault(entry.position_key, []).append(entry)
+            self._by_claim_key.setdefault((entry.position_key, entry.claim.status), []).append(entry)
+            return entry
+        else:
+            raise TypeError(f"cannot index {type(value).__name__}")
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __iter__(self) -> Iterator[IndexEntry]:
+        return iter(self._entries)
+
+    def __contains__(self, board: chess.Board) -> bool:
+        return position_key(board) in self._by_position_key
+
+    def __getitem__(self, key: Any) -> List[IndexEntry]:
+        if isinstance(key, chess.Board):
+            return self.find_all(key)
+        if isinstance(key, tuple) and len(key) == 2:
+            wanted = _coerce_claim_status(key[1])
+            if wanted is not None:
+                return list(self._by_claim_key.get((key[0], wanted), []))
+        return self.find_all(key)
+
+    def find_all(self, board: chess.Board) -> List[IndexEntry]:
+        """Finds all occurrences with the same repetition identity."""
+        return list(self._by_position_key.get(position_key(board), []))
+
+    find_position = find_all
+    find_by_position = find_all
+    lookup = find_all
+    find_all_claims = find_all
+
+    def repetitions(self, board: chess.Board) -> int:
+        """Returns the number of known occurrences of the position."""
+        return _known_repetition_count(board)
+
+    def repetition_claimable(self, board: chess.Board) -> bool:
+        return _repetition_claimable(board, self.rules)
+
+    def fifty_move_claimable(self, board: chess.Board) -> bool:
+        return _fifty_move_claimable(board, self.rules)
+
+    def find(self, board: chess.Board, *, status: Optional[ClaimStatus] = None, rules: Any = None) -> List[IndexEntry]:
+        """
+        Finds occurrences of the same position, optionally restricted to a
+        claim status.
+
+        If *rules* is given, assessments are recomputed with those rules
+        instead of the rules the index was built with.
+        """
+        entries = self.find_all(board)
+        wanted = _coerce_claim_status(status)
+        if wanted is None and rules is None:
+            return entries
+
+        draw_rules = self.rules if rules is None else _coerce_draw_rules(rules)
+        result = []
+        for entry in entries:
+            assessment = entry.claim
+            if rules is not None:
+                assessment = assess_claim(entry.board, rules=draw_rules, history_known=entry.claim.history_known)
+            if wanted is None or assessment.status is wanted:
+                result.append(entry)
+        return result
+
+    def aggregate_status(self, board: chess.Board, *, rules: Any = None) -> ClaimStatus:
+        """
+        Aggregates the statuses of all occurrences of *board*.
+
+        A proven claim on any line wins over an undecidable line, which in
+        turn wins over a proven non-claim. This answers whether *some* line
+        reaching this position is known to allow the claim.
+        """
+        statuses = self.statuses(board, rules=rules)
+        if ClaimStatus.CLAIMABLE in statuses:
+            return ClaimStatus.CLAIMABLE
+        if ClaimStatus.UNKNOWN in statuses:
+            return ClaimStatus.UNKNOWN
+        return ClaimStatus.NOT_CLAIMABLE
+
+    summary_status = aggregate_status
+    best_status = aggregate_status
+
+    def find_by_repetitions(self, board: chess.Board, count: int) -> List[IndexEntry]:
+        """Finds occurrences of *board* whose known repetition count is *count*."""
+        return [entry for entry in self.find_all(board) if entry.claim.repetitions == count]
+
+    def find_at_least_repetitions(self, board: chess.Board, count: int) -> List[IndexEntry]:
+        return [entry for entry in self.find_all(board) if entry.claim.repetitions >= count]
+
+    def find_halfmove_clock(self, board: chess.Board, *, at_least: int = 0, at_most: Optional[int] = None) -> List[IndexEntry]:
+        result = []
+        for entry in self.find_all(board):
+            clock = entry.claim.halfmove_clock
+            if clock >= at_least and (at_most is None or clock <= at_most):
+                result.append(entry)
+        return result
+
+    find_by_halfmove_clock = find_halfmove_clock
+
+    def find_claimable(self, board: chess.Board, *, rules: Any = None) -> List[IndexEntry]:
+        return self.find(board, status=ClaimStatus.CLAIMABLE, rules=rules)
+
+    def find_unknown(self, board: chess.Board, *, rules: Any = None) -> List[IndexEntry]:
+        return self.find(board, status=ClaimStatus.UNKNOWN, rules=rules)
+
+    def find_not_claimable(self, board: chess.Board, *, rules: Any = None) -> List[IndexEntry]:
+        return self.find(board, status=ClaimStatus.NOT_CLAIMABLE, rules=rules)
+
+    def statuses(self, board: chess.Board, *, rules: Any = None) -> Set[ClaimStatus]:
+        if rules is None:
+            return {entry.claim.status for entry in self.find_all(board)}
+
+        draw_rules = _coerce_draw_rules(rules)
+        return {
+            assess_claim(entry.board, rules=draw_rules, history_known=entry.claim.history_known).status
+            for entry in self.find_all(board)}
+
+    def status(self, board: chess.Board, *, rules: Any = None, history_known: Optional[bool] = None) -> ClaimStatus:
+        return assess_claim(board, rules=self.rules if rules is None else rules, history_known=history_known).status
+
+    def iter_status(self, status: Any, *, rules: Any = None) -> Iterator[IndexEntry]:
+        wanted = _coerce_claim_status(status)
+        if wanted is None:
+            raise TypeError("status is required")
+
+        if rules is None:
+            for entry in self._entries:
+                if entry.claim.status is wanted:
+                    yield entry
+            return
+
+        draw_rules = _coerce_draw_rules(rules)
+        for entry in self._entries:
+            assessment = assess_claim(entry.board, rules=draw_rules, history_known=entry.claim.history_known)
+            if assessment.status is wanted:
+                yield entry
+
+    def find_all_by_status(self, status: Any, *, rules: Any = None) -> List[IndexEntry]:
+        return list(self.iter_status(status, rules=rules))
+
+    def find_all_claimable(self, *, rules: Any = None) -> List[IndexEntry]:
+        return self.find_all_by_status(ClaimStatus.CLAIMABLE, rules=rules)
+
+    def find_all_unknown(self, *, rules: Any = None) -> List[IndexEntry]:
+        return self.find_all_by_status(ClaimStatus.UNKNOWN, rules=rules)
+
+    def find_all_not_claimable(self, *, rules: Any = None) -> List[IndexEntry]:
+        return self.find_all_by_status(ClaimStatus.NOT_CLAIMABLE, rules=rules)
+
+    def find_fifty_moves_claimable(self, *, rules: Any = None) -> List[IndexEntry]:
+        draw_rules = self.rules if rules is None else _coerce_draw_rules(rules)
+        return [entry for entry in self._entries
+                if entry.claim.fifty_move_status is ClaimStatus.CLAIMABLE
+                or (rules is not None and _fifty_move_claimable(entry.board, draw_rules))]
+
+    def find_repetition_claimable(self, *, rules: Any = None) -> List[IndexEntry]:
+        draw_rules = self.rules if rules is None else _coerce_draw_rules(rules)
+        return [entry for entry in self._entries
+                if entry.claim.repetition_status is ClaimStatus.CLAIMABLE
+                or (rules is not None and _repetition_claimable(entry.board, draw_rules))]
+
+    def find_by_fen(self, fen: str) -> List[IndexEntry]:
+        return self.find_all(chess.Board(fen))
+
+    def keys(self) -> Iterable[Tuple[Hashable, ClaimStatus]]:
+        return self._by_claim_key.keys()
+
+    @property
+    def entries(self) -> List[IndexEntry]:
+        return list(self._entries)
+
+    @classmethod
+    def from_pgn(cls, handle: TextIO, *, rules: Any = None, **kwargs: Any) -> "ClaimIndex":
+        index = cls(rules=rules, **kwargs)
+        index.add_games_from_pgn(handle)
+        return index
+
+    @classmethod
+    def from_games(cls, games: Iterable[Game], *, rules: Any = None, **kwargs: Any) -> "ClaimIndex":
+        return cls(games, rules=rules, **kwargs)
+
+    def add_games_from_pgn(self, handle: TextIO) -> None:
+        while True:
+            game = read_game(handle)
+            if game is None:
+                break
+            self.add_game(game)
+
+
+DrawIndex = ClaimIndex
+RepetitionIndex = ClaimIndex
+ClaimabilityIndex = ClaimIndex
+FiftyMoveIndex = ClaimIndex
+ThreefoldIndex = ClaimIndex
+DrawClaimIndex = ClaimIndex
+RepetitionClaimIndex = ClaimIndex
+DrawClaimabilityIndex = ClaimIndex
+
+
+class PGNIndex:
+    """
+    A two-layer index for imported PGN games.
+
+    * :attr:`moves` (also available as :attr:`by_moves`) answers queries by
+      the set of currently legal moves.
+    * :attr:`claims` (also available as :attr:`by_claim`) answers queries by
+      repetition/fifty-move claim eligibility.
+
+    The two layers serve different purposes. Two variations can transpose to
+    the same piece placement and meet in the move index while having different
+    histories and therefore different claim statuses. Conversely, the claim
+    index keeps positions with different move sets apart because castling
+    rights and en passant are part of the repetition identity.
+    """
+
+    def __init__(self, games: Any = None, *, rules: Any = None, **kwargs: Any) -> None:
+        self.rules = _extract_rules(rules, kwargs)
+        self.moves = PositionIndex(rules=self.rules)
+        self.claims = ClaimIndex(rules=self.rules)
+        if games is not None:
+            for game in _iter_source_games(games):
+                self.add_game(game)
+
+    @property
+    def positions(self) -> PositionIndex:
+        return self.moves
+
+    @property
+    def by_moves(self) -> PositionIndex:
+        return self.moves
+
+    @property
+    def by_claim(self) -> ClaimIndex:
+        return self.claims
+
+    @property
+    def draw_claims(self) -> ClaimIndex:
+        return self.claims
+
+    @property
+    def position_index(self) -> PositionIndex:
+        return self.moves
+
+    @property
+    def claim_index(self) -> ClaimIndex:
+        return self.claims
+
+    @property
+    def move_layer(self) -> PositionIndex:
+        return self.moves
+
+    @property
+    def claim_layer(self) -> ClaimIndex:
+        return self.claims
+
+    def add_game(self, game: Game) -> List[IndexEntry]:
+        self.moves.add_game(game)
+        return self.claims.add_game(game)
+
+    def add(self, value: Union[Game, GameNode, chess.Board]) -> Union[IndexEntry, List[IndexEntry]]:
+        if isinstance(value, Game):
+            return self.add_game(value)
+        elif isinstance(value, GameNode):
+            self.moves.add(value)
+            return self.claims.add(value)
+        elif isinstance(value, chess.Board):
+            self.moves.add(value)
+            return self.claims.add(value)
+        else:
+            raise TypeError(f"cannot index {type(value).__name__}")
+
+    def find(self, board: chess.Board) -> List[IndexEntry]:
+        """Finds by current legal moves (the first layer)."""
+        return self.moves.find(board)
+
+    lookup = find
+
+    def find_by_moves(self, moves: Iterable[Union[chess.Move, str]]) -> List[IndexEntry]:
+        return self.moves.find_by_moves(moves)
+
+    find_moves = find_by_moves
+
+    def find_claim(self, board: chess.Board, *, status: Optional[ClaimStatus] = None, rules: Any = None) -> List[IndexEntry]:
+        """Finds by repetition/fifty-move claim status (the second layer)."""
+        return self.claims.find(board, status=status, rules=rules)
+
+    def find_with_move(self, board: chess.Board, move: chess.Move) -> List[IndexEntry]:
+        return self.moves.find_with_move(board, move)
+
+    def has_move(self, board: chess.Board, move: chess.Move) -> bool:
+        return self.moves.has_move(board, move)
+
+    def find_move(self, move: chess.Move) -> List[IndexEntry]:
+        return self.moves.find_move(move)
+
+    def legal_moves(self, board: chess.Board) -> Tuple[str, ...]:
+        return self.moves.legal_moves(board)
+
+    def claim_status(self, board: chess.Board, *, status: Optional[ClaimStatus] = None, rules: Any = None) -> Optional[ClaimStatus]:
+        wanted = _coerce_claim_status(status)
+        if wanted is not None:
+            return wanted
+        entries = self.claims.find_all(board)
+        if entries:
+            return self.claims.aggregate_status(board, rules=rules)
+        return assess_claim(board, rules=self.rules if rules is None else rules).status
+
+    def find_claimable(self, board: chess.Board, *, rules: Any = None) -> List[IndexEntry]:
+        return self.claims.find_claimable(board, rules=rules)
+
+    def find_position(self, board: chess.Board) -> List[IndexEntry]:
+        """Finds all occurrences with the same repetition identity."""
+        return self.claims.find_all(board)
+
+    find_by_position = find_position
+    find_all_positions = find_position
+
+    def find_by_repetitions(self, board: chess.Board, count: int) -> List[IndexEntry]:
+        return self.claims.find_by_repetitions(board, count)
+
+    def find_at_least_repetitions(self, board: chess.Board, count: int) -> List[IndexEntry]:
+        return self.claims.find_at_least_repetitions(board, count)
+
+    def statuses(self, board: chess.Board, *, rules: Any = None) -> Set[ClaimStatus]:
+        return self.claims.statuses(board, rules=rules)
+
+    def aggregate_status(self, board: chess.Board, *, rules: Any = None) -> ClaimStatus:
+        return self.claims.aggregate_status(board, rules=rules)
+
+    def query(self, board: chess.Board) -> List[IndexEntry]:
+        """Alias for the first (move) layer."""
+        return self.find(board)
+
+    query_moves = query
+    query_by_moves = query
+    query_position = query
+    query_claim = find_claim
+    query_by_claim = find_claim
+
+    def move_entries(self) -> List[IndexEntry]:
+        return self.moves.entries
+
+    def claim_entries(self) -> List[IndexEntry]:
+        return self.claims.entries
+
+    def find_not_claimable(self, board: chess.Board, *, rules: Any = None) -> List[IndexEntry]:
+        return self.claims.find_not_claimable(board, rules=rules)
+
+    def add_games_from_pgn(self, handle: TextIO) -> None:
+        for game in _read_all_games(handle):
+            self.add_game(game)
+
+    def find_unknown(self, board: chess.Board, *, rules: Any = None) -> List[IndexEntry]:
+        return self.claims.find_unknown(board, rules=rules)
+
+    def find_by_placement(self, board: chess.Board) -> List[IndexEntry]:
+        return self.moves.find_by_placement(board)
+
+    def find_by_fen(self, fen: str) -> List[IndexEntry]:
+        return self.moves.find_by_fen(fen)
+
+    query_fen = find_by_fen
+
+    def find_all_claimable(self, *, rules: Any = None) -> List[IndexEntry]:
+        return self.claims.find_all_claimable(rules=rules)
+
+    def find_all_unknown(self, *, rules: Any = None) -> List[IndexEntry]:
+        return self.claims.find_all_unknown(rules=rules)
+
+    def find_fifty_moves_claimable(self, *, rules: Any = None) -> List[IndexEntry]:
+        return self.claims.find_fifty_moves_claimable(rules=rules)
+
+    def find_repetition_claimable(self, *, rules: Any = None) -> List[IndexEntry]:
+        return self.claims.find_repetition_claimable(rules=rules)
+
+    def assess(self, board: chess.Board, *, history_known: Optional[bool] = None) -> ClaimAssessment:
+        return assess_claim(board, rules=self.rules, history_known=history_known)
+
+    def __len__(self) -> int:
+        return len(self.moves)
+
+    def __iter__(self) -> Iterator[IndexEntry]:
+        return iter(self.moves)
+
+    def __getitem__(self, board: chess.Board) -> List[IndexEntry]:
+        return self.moves[board]
+
+    def __contains__(self, board: chess.Board) -> bool:
+        return board in self.moves
+
+    @property
+    def entries(self) -> List[IndexEntry]:
+        return self.moves.entries
+
+    @classmethod
+    def from_pgn(cls, handle: TextIO, *, rules: Any = None, **kwargs: Any) -> "PGNIndex":
+        return cls(_read_all_games(handle), rules=rules, **kwargs)
+
+    @classmethod
+    def from_games(cls, games: Iterable[Game], *, rules: Any = None, **kwargs: Any) -> "PGNIndex":
+        return cls(games, rules=rules, **kwargs)
+
+    @classmethod
+    def from_file(cls, path: Any, *, rules: Any = None, **kwargs: Any) -> "PGNIndex":
+        return cls(path, rules=rules, **kwargs)
+
+    from_path = from_file
+
+    @classmethod
+    def from_game(cls, game: Game, *, rules: Any = None, **kwargs: Any) -> "PGNIndex":
+        return cls([game], rules=rules, **kwargs)
+
+
+OpeningIndex = PGNIndex
+GameIndex = PGNIndex
+OpeningBookIndex = PGNIndex
+TwoLevelIndex = PGNIndex
+TwoTierIndex = PGNIndex
+PGNDatabaseIndex = PGNIndex
+PGNDatabase = PGNIndex
+OpeningDatabase = PGNIndex
+OpeningDatabaseIndex = PGNIndex
+GameDatabase = PGNIndex
+Index = PGNIndex
+
+
+def _read_all_games(handle: TextIO) -> Iterator[Game]:
+    while True:
+        game = read_game(handle)
+        if game is None:
+            break
+        yield game
+
+
+def build_index(source: Any, *, rules: Any = None, **kwargs: Any) -> PGNIndex:
+    """
+    Builds a two-layer :class:`PGNIndex` from a PGN text stream, an iterable
+    of games, or a single game.
+    """
+    draw_rules = _extract_rules(rules, kwargs)
+    return PGNIndex(_iter_source_games(source), rules=draw_rules)
+
+
+build_pgn_index = build_index
+index_pgn = build_index
+read_pgn_index = build_index
+import_pgn = build_index
+index_game = build_index
+build_game_index = build_index
+create_index = build_index
+create_pgn_index = build_index
+
+
+def build_position_index(source: Any, *, rules: Any = None) -> PositionIndex:
+    return build_index(source, rules=rules).moves
+
+
+def build_claim_index(source: Any, *, rules: Any = None) -> ClaimIndex:
+    return build_index(source, rules=rules).claims
+
+
+def index_games(games: Iterable[Game], *, rules: Any = None) -> PGNIndex:
+    return PGNIndex.from_games(games, rules=rules)
+
+
+def index_pgn_games(handle: TextIO, *, rules: Any = None) -> PGNIndex:
+    return PGNIndex.from_pgn(handle, rules=rules)
