@@ -1,0 +1,15 @@
+{
+  "old": {"factor": "0.1", "offset": "-40", "bits": 16, "signed": false,
+          "reserved": ["0xFFFF"]},
+  "new": {"factor": "-0.05", "offset": "120", "bits": 16, "signed": false,
+          "reserved": ["0xFFFF", "705-709"]},
+  "limit": {"value": "84.5", "direction": "above", "inclusive": false},
+  "buckets": [
+    {"lo": "20", "hi": "30", "count": 12},
+    {"lo": "30", "hi": "40", "count": 7},
+    {"lo": "40", "hi": "50", "count": 9},
+    {"lo": "50", "hi": "60", "count": 4},
+    {"lo": "60", "hi": "70", "count": 6},
+    {"lo": "70", "hi": "80", "count": 3}
+  ]
+}
