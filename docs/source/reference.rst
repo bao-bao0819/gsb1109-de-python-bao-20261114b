@@ -128,6 +128,13 @@ Pens
    :members:
    :undoc-members:
 
+Matching
+--------
+
+.. automodule:: ufoLib2.matching
+   :members:
+   :undoc-members:
+
 Constants
 ---------
 
