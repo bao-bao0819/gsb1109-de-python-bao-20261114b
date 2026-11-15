@@ -186,6 +186,607 @@ class TimeControl:
     type: TimeControlType = TimeControlType.UNKNOWN
 
 
+class EvalPerspective(enum.Enum):
+    """
+    Point of view used by an evaluation annotation.
+
+    ``SIDE_TO_MOVE`` (also ``RELATIVE``) means a positive value favors the
+    player whose turn it is. ``WHITE`` and ``BLACK`` mean the value is already
+    relative to that color, regardless of whose turn it is.
+
+    ``chess.pgn`` reads and writes ``[%eval ...]`` annotations from White's
+    point of view (see :func:`GameNode.eval() <chess.pgn.GameNode.eval>` and
+    :func:`GameNode.set_eval() <chess.pgn.GameNode.set_eval>`). Use
+    ``SIDE_TO_MOVE`` for archives that follow a different convention.
+    """
+
+    SIDE_TO_MOVE = "side_to_move"
+    RELATIVE = "side_to_move"
+    WHITE = "white"
+    BLACK = "black"
+
+
+def _coerce_eval_perspective(perspective: Any) -> EvalPerspective:
+    if isinstance(perspective, EvalPerspective):
+        return perspective
+    if perspective is chess.WHITE:
+        return EvalPerspective.WHITE
+    if perspective is chess.BLACK:
+        return EvalPerspective.BLACK
+    if isinstance(perspective, str):
+        normalized = perspective.strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in ("side_to_move", "relative", "stm", "turn", "player_to_move"):
+            return EvalPerspective.SIDE_TO_MOVE
+        if normalized in ("white", "w", "white_pov", "whitepov"):
+            return EvalPerspective.WHITE
+        if normalized in ("black", "b", "black_pov", "blackpov"):
+            return EvalPerspective.BLACK
+    raise ValueError(f"not an evaluation perspective: {perspective!r}")
+
+
+def _perspective_color(perspective: Union[EvalPerspective, Color, str], turn: Color) -> Color:
+    convention = _coerce_eval_perspective(perspective)
+    if convention is EvalPerspective.WHITE:
+        return chess.WHITE
+    elif convention is EvalPerspective.BLACK:
+        return chess.BLACK
+    else:
+        return turn
+
+
+def _to_white_score(score: chess.engine.Score, convention: EvalPerspective, turn: Color) -> chess.engine.Score:
+    """Converts a score written in *convention* to White's point of view."""
+    if convention is EvalPerspective.WHITE:
+        return score
+    elif convention is EvalPerspective.BLACK:
+        return -score
+    else:
+        return score if turn == chess.WHITE else -score
+
+
+def _white_score_to_pov(score: chess.engine.Score, perspective: EvalPerspective, turn: Color) -> chess.engine.PovScore:
+    """Converts a White-relative score to the requested point of view."""
+    if perspective is EvalPerspective.WHITE:
+        return chess.engine.PovScore(score, chess.WHITE)
+    elif perspective is EvalPerspective.BLACK:
+        return chess.engine.PovScore(-score, chess.BLACK)
+    else:
+        return chess.engine.PovScore(score if turn == chess.WHITE else -score, turn)
+
+
+def _parse_zero_mate(token: str, turn: Color, convention: EvalPerspective) -> chess.engine.Score:
+    """
+    Resolves the sign of an ``[%eval #0]`` annotation to a White-relative
+    score.
+
+    A bare ``#0`` follows the specification and :func:`GameNode.eval`: the
+    player to move after mate has been mated. Explicit ``#+0`` and ``#-0``
+    keep their stated sign instead of being reinterpreted.
+    """
+    sign = token[0] if token[:1] in "+-" else ""
+    if not sign:
+        # A bare #0 follows the historical chess.pgn reading, independent of
+        # the batch convention.
+        return chess.engine.Mate(0) if turn == chess.WHITE else chess.engine.MateGiven
+
+    if convention is EvalPerspective.SIDE_TO_MOVE:
+        positive = (sign == "+") == (turn == chess.WHITE)
+    elif convention is EvalPerspective.WHITE:
+        positive = sign == "+"
+    else:
+        positive = sign == "-"
+
+    return chess.engine.MateGiven if positive else chess.engine.Mate(0)
+
+
+def _parse_eval_match(match: typing.Match[str], *, turn: Color, convention: EvalPerspective) -> Tuple[chess.engine.Score, Optional[int]]:
+    """Parses an ``EVAL_REGEX`` match to a White-relative score and depth."""
+    depth = int(match.group("depth")) if match.group("depth") is not None else None
+    mate_token = match.group("mate")
+    if mate_token is not None:
+        if int(mate_token) == 0:
+            return _parse_zero_mate(mate_token, turn, convention), depth
+        else:
+            return _to_white_score(chess.engine.Mate(int(mate_token)), convention, turn), depth
+    else:
+        score = chess.engine.Cp(round(float(match.group("cp")) * 100))
+        return _to_white_score(score, convention, turn), depth
+
+
+def _eval_order_key(score: chess.engine.Score) -> Tuple[int, int]:
+    """
+    Returns a key implementing the total order of :class:`chess.engine.Score`
+    without clipping mate scores to a finite centi-pawn range.
+
+    Negative mates (including ``Mate(0)``) sort below ordinary scores,
+    centi-pawn scores sort in between, and positive mates (including
+    ``MateGiven``) sort above them. Closer positive mates are better, while
+    farther negative mates are better, because they delay the loss.
+    """
+    if isinstance(score, chess.engine.MateGivenType):
+        return (3, 0)
+    mate = score.mate()
+    if mate is None:
+        return (1, int(score.score()))
+    elif mate > 0:
+        return (2, -mate)
+    else:
+        return (0, -mate)
+
+
+@dataclasses.dataclass
+class EvalReport:
+    """
+    One ``[%eval ...]`` observation, normalized to a single point of view.
+
+    *score* is a :class:`chess.engine.PovScore`; its ``relative`` value is
+    relative to its ``turn``. *depth* is the original integer or ``None`` when
+    the annotation did not specify a depth. *raw* preserves the complete
+    annotation as written, while *raw_score* and *raw_depth* preserve the
+    individual tokens (for example ``"#-3"`` and ``"12"``).
+
+    Equal reports do not dominate each other. The original notation is part of
+    the record, so differently written observations remain distinguishable.
+    """
+
+    score: chess.engine.PovScore
+    """The normalized score."""
+
+    depth: Optional[int] = None
+    """The search depth, or ``None`` if the annotation has no depth."""
+
+    raw: str = ""
+    """The annotation as written, for example ``"[%eval #-3,12]"``."""
+
+    raw_score: Optional[str] = None
+    """The score token as written, for example ``"-0.50"`` or ``"#-3"``."""
+
+    raw_depth: Optional[str] = None
+    """The depth token as written, or ``None``."""
+
+    position: Optional[str] = None
+    """An EPD key identifying the position, if known."""
+
+    convention: EvalPerspective = EvalPerspective.WHITE
+    """The point of view that the original annotation used."""
+
+    node: Optional[GameNode] = dataclasses.field(default=None, compare=False, repr=False)
+    """The source node, if available. Not used for equality."""
+
+    def __post_init__(self) -> None:
+        if isinstance(self.score, chess.engine.Score):
+            self.score = chess.engine.PovScore(self.score, chess.WHITE)
+        self.convention = _coerce_eval_perspective(self.convention)
+        if self.depth is not None and self.depth < 0:
+            raise ValueError("evaluation depth must not be negative")
+
+    @property
+    def search_depth(self) -> Optional[int]:
+        """The search depth, or ``None`` if unknown."""
+        return self.depth
+
+    @property
+    def pov(self) -> Color:
+        """The color that :attr:`score` is relative to."""
+        return self.score.turn
+
+    @property
+    def relative(self) -> chess.engine.Score:
+        """The score relative to :attr:`pov`."""
+        return self.score.relative
+
+    @property
+    def perspective(self) -> EvalPerspective:
+        """The point of view of :attr:`score` as an enum member."""
+        return EvalPerspective.WHITE if self.score.turn == chess.WHITE else EvalPerspective.BLACK
+
+    @property
+    def is_relative(self) -> bool:
+        """Whether the original annotation was relative to the side to move."""
+        return self.convention is EvalPerspective.SIDE_TO_MOVE
+
+    def is_mate(self) -> bool:
+        """Tests if this is a mate score."""
+        return self.score.is_mate()
+
+    def mate(self) -> Optional[int]:
+        """Returns the number of plies to mate, if any."""
+        return self.score.relative.mate()
+
+    def white(self) -> chess.engine.Score:
+        """Gets the score from White's point of view."""
+        return self.score.white()
+
+    def black(self) -> chess.engine.Score:
+        """Gets the score from Black's point of view."""
+        return self.score.black()
+
+    def pov_score(self) -> chess.engine.PovScore:
+        """Gets the normalized score as a :class:`chess.engine.PovScore`."""
+        return self.score
+
+    def order_key(self, perspective: Optional[Union[EvalPerspective, Color, str]] = None) -> Tuple[int, int]:
+        """Sort key following the chess meaning of the score from *perspective*."""
+        color = _perspective_color(perspective, self.pov) if perspective is not None else self.pov
+        return _eval_order_key(self.score.pov(color))
+
+    def dominates(self, other: EvalReport, *, perspective: Optional[Union[EvalPerspective, Color, str]] = None) -> bool:
+        """
+        Tests if this report is at least as deep and at least as good as
+        *other*, with at least one strict improvement.
+
+        Reports without a known depth neither dominate nor are dominated.
+        """
+        return _eval_report_dominates(self, other, perspective=perspective)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Returns a JSON-friendly representation, preserving the raw notation."""
+        return {
+            "score": str(self.score.relative),
+            "white": str(self.score.white()),
+            "black": str(self.score.black()),
+            "mate": self.mate(),
+            "depth": self.depth,
+            "raw": self.raw,
+            "raw_score": self.raw_score,
+            "raw_depth": self.raw_depth,
+            "convention": self.convention.value,
+            "perspective": self.perspective.value,
+            "pov": "white" if self.pov == chess.WHITE else "black",
+            "position": self.position,
+        }
+
+    def __str__(self) -> str:
+        return self.raw or str(self.score.relative)
+
+
+def parse_eval_annotations(
+    text: str,
+    *,
+    turn: Color,
+    convention: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+    perspective: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+    position: Optional[str] = None,
+    node: Optional[GameNode] = None,
+) -> List[EvalReport]:
+    """
+    Parses all valid ``[%eval ...]`` annotations in *text*.
+
+    *turn* is the side to move at the annotated position. *convention* says
+    how the numbers were written, while *perspective* selects the point of
+    view of the returned reports.
+
+    Both the search depth and the original spelling are retained. An
+    annotation without a depth yields ``depth=None`` rather than a made-up
+    zero.
+
+    >>> parse_eval_annotations("[%eval -0.50,18]", turn=chess.BLACK,
+    ...                        convention="side_to_move",
+    ...                        perspective="white")[0].white()
+    Cp(+50)
+    """
+    convention = _coerce_eval_perspective(convention)
+    perspective = _coerce_eval_perspective(perspective)
+
+    reports = []
+    for match in EVAL_REGEX.finditer(text):
+        raw_score = ("#" + match.group("mate")) if match.group("mate") is not None else match.group("cp")
+        white_score, depth = _parse_eval_match(match, turn=turn, convention=convention)
+        reports.append(EvalReport(
+            score=_white_score_to_pov(white_score, perspective, turn),
+            depth=depth,
+            raw=match.group(0).strip(),
+            raw_score=raw_score,
+            raw_depth=match.group("depth"),
+            position=position,
+            convention=convention,
+            node=node,
+        ))
+    return reports
+
+
+def _normalize_eval_report(report: EvalReport, perspective: EvalPerspective) -> EvalReport:
+    if perspective is EvalPerspective.SIDE_TO_MOVE:
+        return report
+    color = chess.WHITE if perspective is EvalPerspective.WHITE else chess.BLACK
+    if report.pov == color:
+        return report
+    return dataclasses.replace(report, score=chess.engine.PovScore(report.score.pov(color), color))
+
+
+def _eval_report_dominates(
+    winner: EvalReport,
+    loser: EvalReport,
+    *,
+    perspective: Optional[Union[EvalPerspective, Color, str]] = None,
+) -> bool:
+    """
+    Tests if *winner* is at least as deep and at least as good, with at least
+    one strict improvement. Reports without a depth can neither dominate nor
+    be dominated, because depth is unknown rather than zero.
+    """
+    if winner.depth is None or loser.depth is None:
+        return False
+    if winner.depth < loser.depth:
+        return False
+
+    color = _perspective_color(perspective, winner.pov) if perspective is not None else winner.pov
+    winner_key = _eval_order_key(winner.score.pov(color))
+    loser_key = _eval_order_key(loser.score.pov(color))
+    if winner_key < loser_key:
+        return False
+    return winner.depth > loser.depth or winner_key > loser_key
+
+
+def non_dominated(
+    reports: Iterable[EvalReport],
+    *,
+    perspective: Optional[Union[EvalPerspective, Color, str]] = None,
+) -> List[EvalReport]:
+    """
+    Returns the reports that are not dominated by any other report in both
+    depth and evaluation, preserving their original order.
+
+    Reports with a missing depth are always retained.
+    """
+    reports = list(reports)
+    color = perspective
+    if color is None and reports:
+        color = reports[0].pov
+    return [
+        report for index, report in enumerate(reports)
+        if not any(
+            _eval_report_dominates(other, report, perspective=color)
+            for other_index, other in enumerate(reports) if other_index != index)
+    ]
+
+
+@dataclasses.dataclass
+class EvalComparison:
+    """
+    A comparison view of evaluation reports for one position.
+
+    All reports are normalized to the same color perspective. The original
+    notation and depth stay available on each :class:`EvalReport`.
+    """
+
+    reports: List[EvalReport] = dataclasses.field(default_factory=list)
+    """All observations, in their original order."""
+
+    position: Optional[str] = None
+    """An EPD key identifying the compared position."""
+
+    perspective: EvalPerspective = EvalPerspective.WHITE
+    """The common point of view of all reports."""
+
+    def __post_init__(self) -> None:
+        self.perspective = _coerce_eval_perspective(self.perspective)
+        if self.perspective is EvalPerspective.SIDE_TO_MOVE:
+            # Side-to-move is only a common view when all reports belong to
+            # the same turn (as they do for a single position). Otherwise a
+            # fixed color is needed to compare them.
+            turns = {report.pov for report in self.reports}
+            if len(turns) > 1:
+                self.perspective = EvalPerspective.WHITE
+        self.reports = [_normalize_eval_report(report, self.perspective) for report in self.reports]
+        if self.position is None:
+            for report in self.reports:
+                if report.position is not None:
+                    self.position = report.position
+                    break
+
+    def non_dominated(self) -> List[EvalReport]:
+        """Returns the Pareto frontier over depth and evaluation."""
+        return non_dominated(self.reports, perspective=self.perspective)
+
+    def frontier(self) -> List[EvalReport]:
+        """Alias for :meth:`non_dominated`."""
+        return self.non_dominated()
+
+    def dominated(self) -> List[EvalReport]:
+        """Returns the reports that are dominated by at least one other report."""
+        return [
+            report for report in self.reports
+            if any(
+                _eval_report_dominates(other, report, perspective=self.perspective)
+                for other in self.reports if other is not report)
+        ]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Returns a JSON-friendly comparison view."""
+        return {
+            "position": self.position,
+            "perspective": self.perspective.value,
+            "reports": [report.to_dict() for report in self.reports],
+            "non_dominated": [report.to_dict() for report in self.non_dominated()],
+        }
+
+    def format(self) -> str:
+        """
+        Formats the comparison view for reading.
+
+        Each line contains the score from the common point of view, the search
+        depth, and the annotation as written. Retained reports are prefixed
+        with ``*``; dominated reports with ``-``. A missing depth is shown as
+        ``?`` and is never treated as zero.
+        """
+        lines = []
+        if self.position:
+            lines.append(self.position)
+        frontier = set(id(report) for report in self.non_dominated())
+        for report in self.reports:
+            depth = "?" if report.depth is None else str(report.depth)
+            marker = "*" if id(report) in frontier else "-"
+            lines.append(f"{marker} {str(report.score.relative):>8} d={depth:<4} {report.raw}")
+        return "\n".join(lines)
+
+    def __str__(self) -> str:
+        return self.format()
+
+    def __len__(self) -> int:
+        return len(self.reports)
+
+    def __iter__(self) -> Iterator[EvalReport]:
+        return iter(self.reports)
+
+
+def _iter_game_nodes(source: Union[GameNode, Iterable[GameNode]]) -> Iterator[GameNode]:
+    if isinstance(source, GameNode):
+        stack = [source]
+        while stack:
+            node = stack.pop()
+            yield node
+            stack.extend(reversed(node.variations))
+    else:
+        for item in source:
+            if not isinstance(item, GameNode):
+                raise TypeError(f"expected GameNode, got {type(item).__name__}")
+            yield from _iter_game_nodes(item)
+
+
+def collect_eval_reports(
+    source: Union[GameNode, Iterable[GameNode]],
+    *,
+    convention: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+    perspective: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+) -> List[EvalReport]:
+    """
+    Collects all ``[%eval ...]`` reports from *source* and all of its
+    variations, preserving game order.
+
+    *source* may be a single node (usually a game), or an iterable of nodes,
+    for example a batch of games. *convention* is the point of view used by
+    the annotations, while *perspective* is the common point of view for the
+    comparison.
+    """
+    reports = []
+    for node in _iter_game_nodes(source):
+        reports.extend(node.eval_reports(convention=convention, perspective=perspective))
+    return reports
+
+
+@dataclasses.dataclass
+class EvalBatch:
+    """
+    A comparison view over a batch of games.
+
+    *convention* is the point of view used by the annotations in the batch,
+    and *perspective* is the common point of view of all reports.
+    """
+
+    source: Union[GameNode, Iterable[GameNode]]
+    """The games or nodes to inspect."""
+
+    convention: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE
+    """The point of view used by the annotations."""
+
+    perspective: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE
+    """The common point of view of the comparison."""
+
+    def reports(self) -> List[EvalReport]:
+        """Returns all reports, in game order."""
+        return collect_eval_reports(
+            self.source, convention=self.convention, perspective=self.perspective)
+
+    def by_position(self) -> Dict[str, EvalComparison]:
+        """Returns comparison views grouped by position."""
+        return eval_comparisons(
+            self.source, convention=self.convention, perspective=self.perspective)
+
+    def non_dominated(self, position: Union[str, chess.Board, GameNode]) -> List[EvalReport]:
+        """Returns the Pareto frontier for one position."""
+        return eval_comparison(
+            self.source, position,
+            convention=self.convention, perspective=self.perspective).non_dominated()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Returns a JSON-friendly comparison view for every position."""
+        return {
+            position: comparison.to_dict()
+            for position, comparison in self.by_position().items()
+        }
+
+    def format(self) -> str:
+        """Formats every position's comparison view, separated by blank lines."""
+        return "\n\n".join(
+            comparison.format() for comparison in self.by_position().values())
+
+
+def compare_evals(
+    source: Union[GameNode, Iterable[GameNode]],
+    *,
+    convention: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+    perspective: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+) -> EvalBatch:
+    """
+    Builds a comparison view over a batch of games.
+
+    Use :meth:`EvalBatch.non_dominated` for one position, or
+    :meth:`EvalBatch.by_position` for all positions.
+    """
+    return EvalBatch(source=source, convention=convention, perspective=perspective)
+
+
+def eval_comparisons(
+    source: Union[GameNode, Iterable[GameNode]],
+    *,
+    convention: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+    perspective: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+) -> Dict[str, EvalComparison]:
+    """
+    Builds comparison views for *source*, grouped by position
+    (:func:`chess.Board.epd`).
+
+    Returns a mapping from EPD keys to :class:`EvalComparison` objects. Use
+    :meth:`EvalComparison.non_dominated` on the relevant entry to get the
+    reports that no other report beats in both depth and evaluation.
+    """
+    perspective = _coerce_eval_perspective(perspective)
+    groups: Dict[str, List[EvalReport]] = {}
+    for report in collect_eval_reports(source, convention=convention, perspective=perspective):
+        groups.setdefault(report.position or "", []).append(report)
+    return {
+        position: EvalComparison(reports=reports, position=position or None, perspective=perspective)
+        for position, reports in groups.items()
+    }
+
+
+def eval_comparison(
+    source: Union[GameNode, Iterable[GameNode]],
+    position: Optional[Union[str, chess.Board, GameNode]] = None,
+    *,
+    convention: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+    perspective: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+) -> EvalComparison:
+    """
+    Builds a comparison view for one position.
+
+    If *position* is omitted and *source* is a node, the node's own position is
+    used. If *position* is a string, it is compared against EPD keys. Reports
+    from all given games and variations are considered.
+    """
+    if position is None:
+        if isinstance(source, GameNode):
+            position = source.board().epd()
+    elif isinstance(position, chess.Board):
+        position = position.epd()
+    elif isinstance(position, GameNode):
+        position = position.board().epd()
+    elif not isinstance(position, str):
+        raise TypeError(f"expected position as str, Board or GameNode, got {type(position).__name__}")
+
+    reports = collect_eval_reports(source, convention=convention, perspective=perspective)
+    if position is not None:
+        reports = [report for report in reports if report.position == position]
+    return EvalComparison(reports=reports, position=position, perspective=perspective)
+
+
+# Descriptive aliases for the comparison view.
+EvalObservation = EvalReport
+compare_eval_annotations = compare_evals
+non_dominated_evals = non_dominated
+
+
 class _AcceptFrame:
     def __init__(self, node: ChildNode, *, is_variation: bool = False, sidelines: bool = True):
         self.state = "pre"
@@ -455,6 +1056,12 @@ class GameNode(abc.ABC):
         Parses the first valid ``[%eval ...]`` annotation in the comment of
         this node, if any.
 
+        The annotation is interpreted from White's point of view (the sign is
+        relative to White), which is the convention written by :func:`set_eval`.
+        The returned :class:`chess.engine.PovScore` is relative to the side to
+        move. To retain all annotations, the depth, and the original notation,
+        use :func:`eval_reports` instead.
+
         Complexity is `O(n)`.
         """
         match = EVAL_REGEX.search(" ".join(self.comments))
@@ -486,19 +1093,117 @@ class GameNode(abc.ABC):
         match = EVAL_REGEX.search(" ".join(self.comments))
         return int(match.group("depth")) if match and match.group("depth") else None
 
+    def eval_reports(
+        self,
+        *,
+        convention: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+        perspective: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+        batch_convention: Optional[Union[EvalPerspective, Color, str]] = None,
+    ) -> List[EvalReport]:
+        """
+        Parses all valid ``[%eval ...]`` annotations in the comment of this
+        node into :class:`EvalReport` objects.
+
+        *convention* is the point of view used by the annotations (the default
+        is White's point of view, as in most PGN archives), while *perspective*
+        is the point of view of the returned reports. A batch that uses a
+        different convention should pass it explicitly, for example
+        ``convention=chess.pgn.EvalPerspective.SIDE_TO_MOVE``.
+
+        *batch_convention* is an accepted alias for *convention*.
+
+        Unlike :func:`eval`, this keeps every report, the search depth, and the
+        original notation. Depth is ``None`` when the annotation does not
+        specify one.
+        """
+        if batch_convention is not None:
+            convention = batch_convention
+        convention = _coerce_eval_perspective(convention)
+        perspective = _coerce_eval_perspective(perspective)
+        try:
+            position = self.board().epd()
+        except ValueError:
+            position = None
+        return parse_eval_annotations(
+            " ".join(self.comments),
+            turn=self.turn(),
+            convention=convention,
+            perspective=perspective,
+            position=position,
+            node=self)
+
+    def eval_report(
+        self,
+        *,
+        convention: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+        perspective: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+    ) -> Optional[EvalReport]:
+        """Parses the first valid ``[%eval ...]`` annotation of this node."""
+        reports = self.eval_reports(convention=convention, perspective=perspective)
+        return reports[0] if reports else None
+
+    def eval_comparison(
+        self,
+        position: Optional[Union[str, chess.Board, "GameNode"]] = None,
+        *,
+        convention: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+        perspective: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+    ) -> EvalComparison:
+        """
+        Builds a comparison view for one position in this node's game tree.
+
+        If *position* is omitted, this node's own position is used. All
+        variations are searched, so transpositions and repeated positions
+        contribute their reports.
+        """
+        return eval_comparison(
+            self, position, convention=convention, perspective=perspective)
+
+    def eval_comparisons(
+        self,
+        *,
+        convention: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+        perspective: Union[EvalPerspective, Color, str] = EvalPerspective.WHITE,
+    ) -> Dict[str, EvalComparison]:
+        """
+        Builds comparison views for this node and all of its variations,
+        grouped by position (:func:`chess.Board.epd`).
+
+        Reports of transpositions and repeated positions are grouped together.
+        Use :meth:`EvalComparison.non_dominated` to get the reports that are
+        not beaten by another report in both depth and evaluation.
+
+        Complexity is `O(n)` for a game with n nodes.
+        """
+        perspective = _coerce_eval_perspective(perspective)
+        groups: Dict[str, List[EvalReport]] = {}
+        for node in _iter_game_nodes(self):
+            for report in node.eval_reports(convention=convention, perspective=perspective):
+                groups.setdefault(report.position or "", []).append(report)
+        return {
+            position: EvalComparison(reports=reports, position=position or None, perspective=perspective)
+            for position, reports in groups.items()
+        }
+
     def set_eval(self, score: Optional[chess.engine.PovScore], depth: Optional[int] = None) -> None:
         """
         Replaces the first valid ``[%eval ...]`` annotation in the comment of
         this node or adds a new one.
+
+        The annotation is written from White's point of view, which is the
+        convention read back by :func:`eval`. Mate distances are written with
+        their sign, so a mate for Black is preserved as e.g. ``#-3``. Pass
+        *depth* to keep a search depth suffix; it is omitted otherwise.
         """
         eval = ""
         if score is not None:
             depth_suffix = "" if depth is None else f",{max(depth, 0):d}"
-            cp = score.white().score()
+            white = score.white()
+            cp = white.score()
             if cp is not None:
                 eval = f"[%eval {float(cp) / 100:.2f}{depth_suffix}]"
-            elif score.white().mate():
-                eval = f"[%eval #{score.white().mate()}{depth_suffix}]"
+            elif white.mate() is not None:
+                eval = f"[%eval #{white.mate()}{depth_suffix}]"
 
         self._replace_or_add_annotation(eval, EVAL_REGEX)
 

@@ -84,6 +84,50 @@ The following visitors are readily available.
 
 .. autoclass:: chess.pgn.FileExporter
 
+Evaluation annotations
+----------------------
+
+``[%eval ...]`` annotations are read and written from White's point of view
+by :func:`chess.pgn.GameNode.eval` and :func:`chess.pgn.GameNode.set_eval`.
+Historic archives sometimes use a different batch convention, for example
+scores relative to the side to move. The following API keeps every observation,
+normalizes it to one point of view, and preserves the original notation and
+search depth.
+
+.. autoclass:: chess.pgn.EvalPerspective
+    :members:
+
+.. autoclass:: chess.pgn.EvalReport
+    :members:
+
+.. autoclass:: chess.pgn.EvalComparison
+    :members:
+
+.. autoclass:: chess.pgn.EvalBatch
+    :members:
+
+For example, to compare a batch whose annotations are relative to the side to
+move, unifying the view to White:
+
+.. code:: python
+
+    game = chess.pgn.Game()
+    game.comments = ["[%eval -0.50,18]"]
+    comparison = game.eval_comparison(perspective="white", convention="side_to_move")
+    print(comparison.format())
+
+.. autofunction:: chess.pgn.parse_eval_annotations
+
+.. autofunction:: chess.pgn.collect_eval_reports
+
+.. autofunction:: chess.pgn.non_dominated
+
+.. autofunction:: chess.pgn.eval_comparison
+
+.. autofunction:: chess.pgn.eval_comparisons
+
+.. autofunction:: chess.pgn.compare_evals
+
 NAGs
 ----
 

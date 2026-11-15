@@ -2957,6 +2957,262 @@ class PgnTestCase(unittest.TestCase):
             game.set_eval(chess.engine.PovScore(chess.engine.Cp(cp), chess.WHITE))
             self.assertEqual(game.eval().white().cp, cp)
 
+    def test_set_eval_mate(self):
+        for move_turn in [chess.WHITE, chess.BLACK]:
+            game = chess.pgn.Game()
+            node = game
+            if move_turn == chess.BLACK:
+                node = game.add_variation(chess.Move.from_uci("e2e4"))
+
+            for score in [
+                chess.engine.PovScore(chess.engine.Mate(+3), move_turn),
+                chess.engine.PovScore(chess.engine.Mate(-3), move_turn),
+            ]:
+                node.comments = []
+                node.set_eval(score, 8)
+                self.assertEqual(len(node.comments), 1)
+                self.assertEqual(node.eval(), score)
+                self.assertEqual(node.eval_depth(), 8)
+                report = node.eval_report()
+                self.assertEqual(report.score, score)
+                self.assertEqual(report.depth, 8)
+
+            node.comments = []
+            node.set_eval(chess.engine.PovScore(chess.engine.Mate(-0), move_turn), 8)
+            self.assertEqual(len(node.comments), 1)
+            self.assertTrue(node.eval().relative.is_mate())
+
+            # A forced win is written as #0, which stays readable as a mate.
+            node.comments = []
+            node.set_eval(chess.engine.PovScore(chess.engine.MateGiven, move_turn), 8)
+            self.assertEqual(node.comments, ["[%eval #0,8]"])
+            self.assertTrue(node.eval().relative.is_mate())
+
+    def test_eval_reports_perspective(self):
+        game = chess.pgn.Game()
+        node = game.add_variation(chess.Move.from_uci("e2e4"))
+        node.comments = ["[%eval -0.50,18]"]
+
+        side_to_move = node.eval_reports(convention=chess.pgn.EvalPerspective.SIDE_TO_MOVE)
+        self.assertEqual(len(side_to_move), 1)
+        self.assertTrue(side_to_move[0].is_relative)
+        self.assertEqual(side_to_move[0].score.white(), chess.engine.Cp(+50))
+        self.assertEqual(side_to_move[0].score.black(), chess.engine.Cp(-50))
+        self.assertEqual(side_to_move[0].depth, 18)  # type: ignore
+        self.assertEqual(side_to_move[0].raw, "[%eval -0.50,18]")
+        self.assertEqual(side_to_move[0].raw_score, "-0.50")
+        self.assertEqual(side_to_move[0].raw_depth, "18")
+
+        white = node.eval_reports(convention="white")
+        self.assertEqual(white[0].score.white(), chess.engine.Cp(-50))
+        self.assertEqual(white[0].perspective, chess.pgn.EvalPerspective.WHITE)
+        self.assertEqual(white[0].to_dict()["perspective"], "white")
+
+    def test_eval_report_zero_mate(self):
+        game = chess.pgn.Game()
+        node = game.add_variation(chess.Move.from_uci("e2e4"))
+        node.comments = ["[%eval #0]"]
+        report = node.eval_report()
+        self.assertEqual(report.score.white(), chess.engine.MateGiven)
+        self.assertTrue(report.is_mate())
+
+        game.comments = ["[%eval #0]"]
+        self.assertEqual(game.eval_report().score.white(), chess.engine.Mate(0))
+
+    def test_eval_report_explicit_zero_mate(self):
+        # A signed zero mate is not reinterpreted as a bare "#0".
+        for turn in [chess.WHITE, chess.BLACK]:
+            plus = chess.pgn.parse_eval_annotations(
+                "[%eval #+0]", turn=turn, convention="white")[0]
+            minus = chess.pgn.parse_eval_annotations(
+                "[%eval #-0]", turn=turn, convention="white")[0]
+            self.assertEqual(plus.white(), chess.engine.MateGiven)
+            self.assertEqual(minus.white(), chess.engine.Mate(-0))
+
+        bare = chess.pgn.parse_eval_annotations("[%eval #0]", turn=chess.BLACK)[0]
+        self.assertEqual(bare.white(), chess.engine.MateGiven)
+
+    def test_eval_comparison_format(self):
+        def report(score, depth, raw):
+            return chess.pgn.EvalReport(
+                score=chess.engine.PovScore(score, chess.WHITE), depth=depth, raw=raw)
+
+        comparison = chess.pgn.EvalComparison(reports=[
+            report(chess.engine.Cp(30), 10, "[%eval 0.30,10]"),
+            report(chess.engine.Cp(40), 9, "[%eval 0.40,9]"),
+            report(chess.engine.Cp(10), None, "[%eval 0.10]"),
+        ], position="position")
+        self.assertEqual(comparison.format().splitlines(), [
+            "position",
+            "*      +30 d=10   [%eval 0.30,10]",
+            "*      +40 d=9    [%eval 0.40,9]",
+            "*      +10 d=?    [%eval 0.10]",
+        ])
+
+    def test_eval_report_dominates_identity(self):
+        def report(score, depth):
+            return chess.pgn.EvalReport(
+                score=chess.engine.PovScore(score, chess.WHITE), depth=depth)
+
+        shallow = report(chess.engine.Cp(0), 10)
+        deep = report(chess.engine.Cp(0), 12)
+        self.assertTrue(deep.dominates(shallow))
+        self.assertFalse(shallow.dominates(deep))
+        self.assertFalse(deep.dominates(deep))
+        self.assertFalse(report(chess.engine.Cp(-10), 12).dominates(shallow))
+        self.assertFalse(report(chess.engine.Cp(10), 8).dominates(shallow))
+
+        unknown = report(chess.engine.Cp(1000), None)
+        self.assertFalse(unknown.dominates(shallow))
+        self.assertFalse(shallow.dominates(unknown))
+
+    def test_eval_report_mixed_conventions(self):
+        game = chess.pgn.Game()
+        game.comments = [
+            "[%eval 0.20,18]",  # White POV
+            "[%eval -0.20,20]",  # also White POV
+        ]
+        reports = game.eval_reports(convention="white")
+        self.assertEqual(len(reports), 2)
+        self.assertEqual([report.white() for report in reports],
+                         [chess.engine.Cp(20), chess.engine.Cp(-20)])
+        self.assertEqual([report.raw for report in reports],
+                         ["[%eval 0.20,18]", "[%eval -0.20,20]"])
+
+        # The same text under a side-to-move batch convention flips for Black.
+        node = game.add_variation(chess.Move.from_uci("e2e4"))
+        node.comments = ["[%eval -0.20,20]"]
+        self.assertEqual(node.eval_reports(convention="side_to_move")[0].white(),
+                         chess.engine.Cp(20))
+
+    def test_eval_report_missing_depth(self):
+        game = chess.pgn.Game()
+        game.comments = ["[%eval 0.00]"]
+        report = game.eval_report()
+        self.assertEqual(report.depth, None)
+        self.assertEqual(report.raw_depth, None)
+        self.assertEqual(game.eval_depth(), None)
+
+        comparison = game.eval_comparisons()[game.board().epd()]
+        self.assertEqual([r.depth for r in comparison.non_dominated()], [None])
+
+    def test_eval_comparison_non_dominated(self):
+        def report(score, depth):
+            return chess.pgn.EvalReport(
+                score=chess.engine.PovScore(score, chess.WHITE), depth=depth)
+
+        comparison = chess.pgn.EvalComparison(reports=[
+            report(chess.engine.Cp(50), 10),
+            report(chess.engine.Cp(50), 12),
+            report(chess.engine.Cp(30), 10),
+            report(chess.engine.Cp(60), 8),
+            report(chess.engine.Cp(999), None),
+        ])
+        self.assertEqual(comparison.non_dominated(), [
+            report(chess.engine.Cp(50), 12),
+            report(chess.engine.Cp(60), 8),
+            report(chess.engine.Cp(999), None),
+        ])
+        self.assertEqual(comparison.dominated(), [
+            report(chess.engine.Cp(50), 10),
+            report(chess.engine.Cp(30), 10),
+        ])
+
+    def test_eval_comparison_mate_ordering(self):
+        def report(score, depth):
+            return chess.pgn.EvalReport(
+                score=chess.engine.PovScore(score, chess.WHITE), depth=depth)
+
+        reports = [
+            report(chess.engine.Mate(+3), 20),
+            report(chess.engine.Mate(+2), 20),
+            report(chess.engine.Mate(-3), 20),
+            report(chess.engine.Mate(-5), 20),
+            report(chess.engine.Cp(100000), 20),
+        ]
+        comparison = chess.pgn.EvalComparison(reports=reports)
+        self.assertEqual(comparison.non_dominated(), [report(chess.engine.Mate(+2), 20)])
+        self.assertIn(report(chess.engine.Cp(100000), 20), comparison.dominated())
+        self.assertIn(report(chess.engine.Mate(-3), 20), comparison.dominated())
+
+        # A farther loss is better: "#-3" at a greater depth dominates "#-2".
+        comparison = chess.pgn.EvalComparison(reports=[
+            report(chess.engine.Mate(-3), 30),
+            report(chess.engine.Mate(-2), 20),
+        ])
+        self.assertEqual(comparison.non_dominated(), [
+            report(chess.engine.Mate(-3), 30),
+        ])
+
+        # With equal depth, the closer win is better.
+        comparison = chess.pgn.EvalComparison(reports=[
+            report(chess.engine.Mate(+3), 20),
+            report(chess.engine.Mate(+2), 20),
+        ])
+        self.assertEqual(comparison.non_dominated(), [
+            report(chess.engine.Mate(+2), 20),
+        ])
+
+    def test_eval_comparison_black_pov(self):
+        game = chess.pgn.Game()
+        game.comments = ["[%eval -0.50,18]"]
+        comparison = game.eval_comparisons(perspective="black")[game.board().epd()]
+        report = comparison.non_dominated()[0]
+        self.assertEqual(report.score, chess.engine.PovScore(chess.engine.Cp(50), chess.BLACK))
+        self.assertEqual(report.white(), chess.engine.Cp(-50))
+        self.assertEqual(report.perspective, chess.pgn.EvalPerspective.BLACK)
+
+    def test_compare_evals_batch(self):
+        games = []
+        for cp, depth in [(20, 18), (30, 20), (10, 20)]:
+            game = chess.pgn.Game()
+            game.comments = [f"[%eval {float(cp) / 100:.2f},{depth}]"]
+            games.append(game)
+
+        batch = chess.pgn.compare_evals(games, convention="white")
+        self.assertEqual(len(batch.reports()), 3)
+
+        position = games[0].board().epd()
+        frontier = batch.non_dominated(position)
+        self.assertEqual(len(frontier), 1)
+        self.assertEqual(frontier[0].white(), chess.engine.Cp(30))
+        self.assertEqual(frontier[0].depth, 20)
+        self.assertEqual(frontier[0].raw, "[%eval 0.30,20]")
+
+        self.assertEqual(list(batch.by_position()), [position])
+        self.assertEqual(batch.to_dict()[position]["non_dominated"][0]["raw_score"], "0.30")
+
+    def test_eval_comparison_variations(self):
+        game = chess.pgn.Game()
+        e4 = game.add_variation(chess.Move.from_uci("e2e4"))
+        e4.comments = ["[%eval 0.20,18]"]
+        d4 = game.add_variation(chess.Move.from_uci("d2d4"))
+        d4.comments = ["[%eval 0.30,20]"]
+
+        # Both moves lead to different positions.
+        comparisons = game.eval_comparisons()
+        self.assertEqual(len(comparisons), 2)
+        self.assertTrue(all(len(comparison.reports) == 1 for comparison in comparisons.values()))
+
+        # A transposition is grouped into the same comparison view.
+        game_a = chess.pgn.Game()
+        node_a = game_a.add_variation(chess.Move.from_uci("g1f3"))
+        node_a = node_a.add_variation(chess.Move.from_uci("d7d5"))
+        node_a = node_a.add_variation(chess.Move.from_uci("d2d4"))
+        node_a.comments = ["[%eval 0.20,18]"]
+
+        game_b = chess.pgn.Game()
+        node_b = game_b.add_variation(chess.Move.from_uci("d2d4"))
+        node_b = node_b.add_variation(chess.Move.from_uci("d7d5"))
+        node_b = node_b.add_variation(chess.Move.from_uci("g1f3"))
+        node_b.comments = ["[%eval 0.30,20]"]
+
+        position = node_a.board().epd()
+        self.assertEqual(position, node_b.board().epd())
+        grouped = chess.pgn.compare_evals([game_a, game_b]).by_position()
+        self.assertEqual(len(grouped[position].reports), 2)
+        self.assertEqual(grouped[position].non_dominated()[0].white(), chess.engine.Cp(30))
+
     def test_float_emt(self):
         game = chess.pgn.Game()
         game.comments = ["[%emt 0:00:01.234]"]

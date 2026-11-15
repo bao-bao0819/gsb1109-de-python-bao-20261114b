@@ -1,6 +1,30 @@
 Changelog for python-chess
 ==========================
 
+New in v1.12.0 (unreleased)
+---------------------------
+
+New features:
+
+* Add ``chess.pgn.EvalPerspective``, ``chess.pgn.EvalReport``,
+  ``chess.pgn.EvalComparison``, and ``chess.pgn.EvalBatch`` to build
+  comparison views of ``[%eval ...]`` annotations. Reports can be normalized
+  from side-to-move, White, or Black conventions to one common point of view,
+  while retaining the search depth and the original notation.
+* Add ``chess.pgn.parse_eval_annotations()``,
+  ``chess.pgn.collect_eval_reports()``, ``chess.pgn.non_dominated()``,
+  ``chess.pgn.eval_comparison()``, ``chess.pgn.eval_comparisons()``, and
+  ``chess.pgn.compare_evals()``. The non-dominated view keeps every report
+  that is not beaten by another report in both search depth and evaluation,
+  including reports without a known depth.
+* Add ``chess.pgn.GameNode.eval_reports()``, ``eval_report()``,
+  ``eval_comparison()``, and ``eval_comparisons()``.
+
+Bugfixes:
+
+* ``chess.pgn.GameNode.set_eval()`` no longer drops a mate score of zero
+  (``MateGiven`` or ``Mate(-0)``); it writes ``[%eval #0]`` instead.
+
 New in v1.11.2 (25th Feb 2025)
 ------------------------------
 
