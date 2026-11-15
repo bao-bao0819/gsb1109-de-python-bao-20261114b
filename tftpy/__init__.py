@@ -14,6 +14,7 @@ from .TftpServer import TftpServer
 from .TftpClient import TftpClient
 from . import __name__ as pkg_name
 from . import TftpContexts, TftpPacketFactory, TftpPacketTypes, TftpStates
+from . import BlockOffsets
 import sys
 
 try:
