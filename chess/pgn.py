@@ -108,6 +108,8 @@ SKIP_MOVETEXT_REGEX = re.compile(r""";|\{|\}""")
 CLOCK_REGEX = re.compile(r"""(?P<prefix>\s?)\[%clk\s(?P<hours>\d+):(?P<minutes>\d+):(?P<seconds>\d+(?:\.\d*)?)\](?P<suffix>\s?)""")
 EMT_REGEX = re.compile(r"""(?P<prefix>\s?)\[%emt\s(?P<hours>\d+):(?P<minutes>\d+):(?P<seconds>\d+(?:\.\d*)?)\](?P<suffix>\s?)""")
 
+PAUSE_REGEX = re.compile(r"""(?P<prefix>\s?)\[%pause\s(?P<hours>\d+):(?P<minutes>\d+):(?P<seconds>\d+(?:\.\d*)?)\](?P<suffix>\s?)""")
+
 EVAL_REGEX = re.compile(r"""
     (?P<prefix>\s?)
     \[%eval\s(?:
@@ -184,6 +186,69 @@ class TimeControl:
 
     parts: list[TimeControlPart] = dataclasses.field(default_factory=list)
     type: TimeControlType = TimeControlType.UNKNOWN
+
+
+@dataclasses.dataclass
+class MoveTimeRange:
+    """
+    The determinable range of thinking time for a single move, in seconds.
+
+    See :func:`chess.pgn.Game.move_time_ranges`.
+    """
+
+    minimum: float
+    """The minimum thinking time consistent with the clock annotations."""
+
+    maximum: Optional[float]
+    """
+    The maximum thinking time consistent with the clock annotations, or
+    ``None`` if there is no upper bound.
+    """
+
+
+@dataclasses.dataclass
+class ClockContradiction:
+    """
+    A shortest interval in which the recorded clock values of one player
+    contradict the time control.
+
+    See :func:`chess.pgn.Game.move_time_ranges`.
+    """
+
+    color: Color
+    """The side whose clock annotations are contradictory."""
+
+    start_move: int
+    """
+    The move count of the player at the start of the contradictory interval
+    (``0`` for the initial clock of the first time control stage).
+    """
+
+    end_move: int
+    """The move count of the player at the end of the contradictory interval."""
+
+    excess: float
+    """
+    The amount of time (in seconds) by which the clock at *end_move* exceeds
+    the maximum explainable value.
+    """
+
+
+@dataclasses.dataclass
+class MoveTimeAnalysis:
+    """
+    The result of :func:`chess.pgn.Game.move_time_ranges`.
+    """
+
+    ranges: List[Optional[MoveTimeRange]]
+    """
+    The determinable thinking time range for each node of the mainline, in
+    the same order as :func:`chess.pgn.GameNode.mainline`. Entries are
+    ``None`` for moves inside a contradictory interval.
+    """
+
+    contradictions: List[ClockContradiction]
+    """Shortest intervals in which clock annotations contradict the time control."""
 
 
 class _AcceptFrame:
@@ -604,6 +669,37 @@ class GameNode(abc.ABC):
 
         self._replace_or_add_annotation(emt, EMT_REGEX)
 
+    def pause(self) -> Optional[float]:
+        """
+        Parses the first valid ``[%pause ...]`` annotation in the comment of
+        this node, if any.
+
+        Returns the duration in seconds for which the clock of the player who
+        made this move was explicitly paused during the move. The player may
+        have kept thinking during the pause, so the paused duration counts
+        towards the thinking time, but not towards the elapsed clock time.
+        """
+        match = PAUSE_REGEX.search(" ".join(self.comments))
+        if match is None:
+            return None
+        return int(match.group("hours")) * 3600 + int(match.group("minutes")) * 60 + float(match.group("seconds"))
+
+    def set_pause(self, seconds: Optional[float]) -> None:
+        """
+        Replaces the first valid ``[%pause ...]`` annotation in the comment of
+        this node or adds a new one.
+        """
+        pause = ""
+        if seconds is not None:
+            seconds = max(0, seconds)
+            hours = int(seconds // 3600)
+            minutes = int(seconds % 3600 // 60)
+            seconds = seconds % 3600 % 60
+            seconds_part = f"{seconds:06.3f}".rstrip("0").rstrip(".")
+            pause = f"[%pause {hours:d}:{minutes:02d}:{seconds_part}]"
+
+        self._replace_or_add_annotation(pause, PAUSE_REGEX)
+
     def _replace_or_add_annotation(self, text: str, regex: re.Pattern[str]) -> None:
         found = 0
         for index in range(len(self.comments)):
@@ -932,6 +1028,122 @@ class Game(GameNode):
         """
         time_control_header = self.headers.get("TimeControl", "")
         return parse_time_control(time_control_header)
+
+    def move_time_ranges(self) -> MoveTimeAnalysis:
+        """
+        Analyzes the sparse ``[%clk ...]`` annotations of the mainline and
+        determines the range of thinking time for each move, as far as can be
+        inferred from the time control.
+
+        The clock of each player is tracked separately through the stages of
+        the time control (see :func:`~chess.pgn.Game.time_control`), taking
+        into account:
+
+        * the initial time of the first stage,
+        * the increment added after each move,
+        * the time added when a player completes the required number of
+          moves of a stage, and
+        * explicitly marked pauses (``[%pause ...]``), during which the clock
+          was stopped while the player could keep thinking. The paused
+          duration is added to the thinking time of that move.
+
+        Between two known clock values, only the *total* thinking time of the
+        enclosed moves is determined. It is **not** distributed evenly: Each
+        of the enclosed moves gets the full possible range. For example, if a
+        clock value appears only every four moves, each of the four moves may
+        independently have taken anywhere between zero and the total elapsed
+        time (plus its pause, if any).
+
+        If the clock values of one player contradict the time control (that
+        is, the clock increased by more than increment and stage bonuses can
+        explain), the shortest contradictory intervals are located and
+        reported as :class:`contradictions <chess.pgn.ClockContradiction>`.
+        Moves inside such intervals get no range (``None``), but moves of the
+        same player outside the contradictory intervals, and all moves of the
+        other player, are still analyzed.
+
+        Returns a :class:`~chess.pgn.MoveTimeAnalysis` with one range per
+        mainline node (in the order of :func:`~chess.pgn.GameNode.mainline`).
+        """
+        parts = self.time_control().parts
+
+        nodes = list(self.mainline())
+        ranges: List[Optional[MoveTimeRange]] = [None] * len(nodes)
+        contradictions: List[ClockContradiction] = []
+
+        root_turn = self.board().turn
+
+        for color in (chess.WHITE, chess.BLACK):
+            # Collect this player's moves along the mainline.
+            moves: List[Tuple[int, Optional[float], float]] = []
+            turn = root_turn
+            for index, node in enumerate(nodes):
+                if turn == color:
+                    moves.append((index, node.clock(), node.pause() or 0.0))
+                turn = not turn
+
+            # Increment and stage bonus credited after each of this player's
+            # moves, and their prefix sums.
+            credits: List[float] = []
+            cumulative = 0
+            stage = 0
+            for k in range(1, len(moves) + 1):
+                while stage < len(parts) and parts[stage].moves and k > cumulative + parts[stage].moves:
+                    cumulative += parts[stage].moves
+                    stage += 1
+                credit = 0.0
+                if stage < len(parts):
+                    credit += parts[stage].increment
+                    if parts[stage].moves and k == cumulative + parts[stage].moves and stage + 1 < len(parts):
+                        credit += parts[stage + 1].time
+                credits.append(credit)
+            prefix = [0.0]
+            for credit in credits:
+                prefix.append(prefix[-1] + credit)
+
+            # Anchors: move counts with known clock values. The initial clock
+            # of the first stage is known from the time control.
+            anchors: List[Tuple[int, float]] = []
+            if parts:
+                anchors.append((0, float(parts[0].time)))
+            for k, (_, clock, _) in enumerate(moves, start=1):
+                if clock is not None:
+                    anchors.append((k, clock))
+
+            def fill(a: int, b: int, total: Optional[float]) -> None:
+                for k in range(a + 1, b + 1):
+                    index, _, pause = moves[k - 1]
+                    if total is None:
+                        ranges[index] = MoveTimeRange(pause, None)
+                    elif a + 1 == b:
+                        # A single move fully accounts for the elapsed time.
+                        ranges[index] = MoveTimeRange(total + pause, total + pause)
+                    else:
+                        ranges[index] = MoveTimeRange(pause, total + pause)
+
+            # Moves before the first anchor are unbounded (only possible
+            # without a known initial clock).
+            if anchors and anchors[0][0] > 0:
+                fill(0, anchors[0][0], None)
+
+            for (a, clock_a), (b, clock_b) in zip(anchors, anchors[1:]):
+                total = clock_a - clock_b + prefix[b] - prefix[a]
+                if total < -1e-6:
+                    # Shortest contradictory interval: Any longer interval
+                    # between non-adjacent anchors is the sum of adjacent
+                    # ones, so it can only be contradictory if it contains a
+                    # contradictory adjacent interval.
+                    contradictions.append(ClockContradiction(color, a, b, -total))
+                else:
+                    fill(a, b, max(0.0, total))
+
+            # Moves after the last anchor are unbounded.
+            if anchors:
+                fill(anchors[-1][0], len(moves), None)
+            else:
+                fill(0, len(moves), None)
+
+        return MoveTimeAnalysis(ranges, contradictions)
 
     @classmethod
     def from_board(cls: Type[GameT], board: chess.Board) -> GameT:

@@ -56,10 +56,27 @@ Both extend :class:`~chess.pgn.GameNode`.
     :members:
 
 .. autoclass:: chess.pgn.Game
-    :members: headers, errors, setup, accept, from_board, without_tag_roster
+    :members: headers, errors, setup, accept, time_control, move_time_ranges, from_board, without_tag_roster
 
 .. autoclass:: chess.pgn.ChildNode
     :members: parent, move, starting_comment, nags, san, uci, end
+
+Thinking times
+--------------
+
+Games may annotate the remaining time after some moves (``[%clk ...]``) and
+pauses (``[%pause ...]``). Based on the time control, the determinable range
+of thinking time for each move can be reconstructed with
+:func:`chess.pgn.Game.move_time_ranges`.
+
+.. autoclass:: chess.pgn.MoveTimeRange
+    :members:
+
+.. autoclass:: chess.pgn.ClockContradiction
+    :members:
+
+.. autoclass:: chess.pgn.MoveTimeAnalysis
+    :members:
 
 Visitors
 --------

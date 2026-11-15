@@ -1,6 +1,19 @@
 Changelog for python-chess
 ==========================
 
+New in v1.12.0 (unreleased)
+---------------------------
+
+New features:
+
+* Add ``chess.pgn.Game.move_time_ranges()`` to reconstruct the determinable
+  range of thinking time for each move from sparse ``[%clk ...]`` annotations,
+  the time control (increments, stage bonuses), and explicit pauses.
+  Contradictory clock readings are localized to the shortest contradictory
+  interval per player.
+* Add ``chess.pgn.GameNode.pause()`` and ``chess.pgn.GameNode.set_pause()``
+  for ``[%pause ...]`` annotations.
+
 New in v1.11.2 (25th Feb 2025)
 ------------------------------
 

@@ -2983,6 +2983,114 @@ class PgnTestCase(unittest.TestCase):
         self.assertEqual(game.comments, ["[%clk 0:00:00]"])  # Clamped
         self.assertEqual(game.clock(), 0)
 
+    def test_pause(self):
+        game = chess.pgn.Game()
+        game.comments = ["foo [%bar] baz"]
+
+        self.assertTrue(game.pause() is None)
+        game.set_pause(90)
+        self.assertEqual(game.comments, ["foo [%bar] baz", "[%pause 0:01:30]"])
+        self.assertEqual(game.pause(), 90)
+
+        game.set_pause(6.54321)
+        self.assertEqual(game.comments, ["foo [%bar] baz", "[%pause 0:00:06.543]"])
+        self.assertEqual(game.pause(), 6.543)
+
+        game.set_pause(None)
+        self.assertEqual(game.comments, ["foo [%bar] baz"])
+        self.assertTrue(game.pause() is None)
+
+    def _game_with_clocks(self, time_control, moves, clocks={}, pauses={}):
+        game = chess.pgn.Game()
+        if time_control is not None:
+            game.headers["TimeControl"] = time_control
+        node = game
+        nodes = []
+        for uci in moves:
+            node = node.add_variation(chess.Move.from_uci(uci))
+            nodes.append(node)
+        for index, clock in clocks.items():
+            nodes[index].set_clock(clock)
+        for index, pause in pauses.items():
+            nodes[index].set_pause(pause)
+        return game, nodes
+
+    def test_move_time_ranges_increment(self):
+        game, _ = self._game_with_clocks("60+2",
+            ["e2e4", "e7e5", "g1f3", "b8c6"],
+            clocks={0: 58, 1: 55, 2: 54, 3: 50})
+
+        analysis = game.move_time_ranges()
+        self.assertEqual(len(analysis.ranges), 4)
+        self.assertEqual(analysis.contradictions, [])
+        self.assertEqual(analysis.ranges[0], chess.pgn.MoveTimeRange(4, 4))
+        self.assertEqual(analysis.ranges[1], chess.pgn.MoveTimeRange(7, 7))
+        self.assertEqual(analysis.ranges[2], chess.pgn.MoveTimeRange(6, 6))
+        self.assertEqual(analysis.ranges[3], chess.pgn.MoveTimeRange(7, 7))
+
+    def test_move_time_ranges_not_averaged(self):
+        game, _ = self._game_with_clocks("100",
+            ["e2e4", "e7e5", "g1f3", "b8c6"],
+            clocks={2: 80})
+
+        analysis = game.move_time_ranges()
+        self.assertEqual(analysis.contradictions, [])
+        # White's first two moves share 20 seconds. The total is not
+        # distributed evenly: Each move gets the full possible range.
+        self.assertEqual(analysis.ranges[0], chess.pgn.MoveTimeRange(0, 20))
+        self.assertEqual(analysis.ranges[2], chess.pgn.MoveTimeRange(0, 20))
+        # Black has no clock annotations: no upper bound.
+        self.assertEqual(analysis.ranges[1], chess.pgn.MoveTimeRange(0, None))
+        self.assertEqual(analysis.ranges[3], chess.pgn.MoveTimeRange(0, None))
+
+    def test_move_time_ranges_stage_and_pause(self):
+        game, _ = self._game_with_clocks("2/10:30",
+            ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6"],
+            clocks={4: 25}, pauses={0: 5})
+
+        analysis = game.move_time_ranges()
+        self.assertEqual(analysis.contradictions, [])
+        # White: 10 - 25 + 30 (added after the 2nd move) = 15 seconds shared
+        # by 3 moves. The pause adds 5 seconds to the first move.
+        self.assertEqual(analysis.ranges[0], chess.pgn.MoveTimeRange(5, 20))
+        self.assertEqual(analysis.ranges[2], chess.pgn.MoveTimeRange(0, 15))
+        self.assertEqual(analysis.ranges[4], chess.pgn.MoveTimeRange(0, 15))
+        # Black: no clock annotations, no upper bound.
+        self.assertEqual(analysis.ranges[1], chess.pgn.MoveTimeRange(0, None))
+
+    def test_move_time_ranges_contradiction(self):
+        game, _ = self._game_with_clocks("60",
+            ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6"],
+            clocks={0: 50, 2: 70, 4: 20, 1: 40, 3: 30})
+
+        analysis = game.move_time_ranges()
+        # White's clock went up from 50 to 70 without increment: Locate the
+        # shortest contradictory interval.
+        self.assertEqual(analysis.contradictions, [
+            chess.pgn.ClockContradiction(chess.WHITE, 1, 2, 20),
+        ])
+        # White's consistent intervals still produce ranges.
+        self.assertEqual(analysis.ranges[0], chess.pgn.MoveTimeRange(10, 10))
+        self.assertIsNone(analysis.ranges[2])
+        self.assertEqual(analysis.ranges[4], chess.pgn.MoveTimeRange(50, 50))
+        # The other player is unaffected.
+        self.assertEqual(analysis.ranges[1], chess.pgn.MoveTimeRange(20, 20))
+        self.assertEqual(analysis.ranges[3], chess.pgn.MoveTimeRange(10, 10))
+        self.assertEqual(analysis.ranges[5], chess.pgn.MoveTimeRange(0, None))
+
+    def test_move_time_ranges_without_time_control(self):
+        game, _ = self._game_with_clocks(None,
+            ["e2e4", "e7e5", "g1f3", "b8c6"],
+            clocks={0: 50, 2: 40})
+
+        analysis = game.move_time_ranges()
+        self.assertEqual(analysis.contradictions, [])
+        # Clock differences are still usable, but moves before the first
+        # annotation are unbounded.
+        self.assertEqual(analysis.ranges[0], chess.pgn.MoveTimeRange(0, None))
+        self.assertEqual(analysis.ranges[2], chess.pgn.MoveTimeRange(10, 10))
+        self.assertEqual(analysis.ranges[1], chess.pgn.MoveTimeRange(0, None))
+
     def test_node_turn(self):
         game = chess.pgn.Game()
         self.assertEqual(game.turn(), chess.WHITE)
