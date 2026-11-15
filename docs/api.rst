@@ -45,7 +45,13 @@ __________
 
 .. automodule:: canmatrix.compare
     :members:
-    
+
+recompute.py
+____________
+
+.. automodule:: canmatrix.recompute
+    :members:
+
 convert.py
 __________
 
