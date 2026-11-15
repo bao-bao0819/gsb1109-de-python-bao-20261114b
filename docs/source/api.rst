@@ -1096,3 +1096,52 @@ Again, it is *strongly encouraged* that you avoid relying on this information
 if at all possible. This functionality should be considered an escape hatch for
 when there is no alternative but to rely on the information, rather than a
 general source of data that is worth relying on.
+
+
+.. _crawl-scheduler:
+
+Crawl scheduling over shared connections
+----------------------------------------
+
+.. versionadded:: 0.16.0
+
+A common use for h11 is to drive a few long-lived HTTP/1.1 connections that
+are shared between several crawl identities.  Because HTTP/1.1 has no
+multiplexing, deciding what to send next is not just a matter of picking the
+most important pending request: a connection that has received its response
+headers is still occupied until that response body has been read to
+:class:`EndOfMessage`.  :mod:`h11._scheduler` models that decision process and
+is exposed at the top level:
+
+.. data:: Account
+
+   A crawl identity.  Cooldowns can target an account, which is how a server
+   freezing one set of credentials leaves other accounts unaffected.
+
+.. data:: Request
+
+   A unit of work with an ``account``, ``site``, ``path``, ``priority``,
+   ``deadline``, expected ``duration`` and optional ``release`` time.  Because
+   it collides with the wire-level :class:`Request` event, it is re-exported as
+   :data:`CrawlRequest`.
+
+.. data:: CooldownRule
+
+   A freeze scoped to ``"account"``, ``"path"`` or ``"site"``, ending at an
+   absolute ``until`` time.  :func:`cooldown_rules_from_response` builds these
+   from ``Retry-After`` and ``X-Crawl-Freeze-*`` response headers.
+
+.. data:: Scheduler
+
+   Owns a fixed list of :data:`Slot` objects and a pending queue.  Its main
+   entry points are :meth:`Scheduler.next_round`, which dispatches one round
+   of work and reports anything newly set aside, and :meth:`Scheduler.replay`,
+   which walks a :data:`TimelineEvent` list deterministically.
+
+Two invariants are worth calling out:
+
+* A slot becomes reusable only when its response body is complete.  Calling
+  :meth:`Slot.finish` early raises :exc:`LocalProtocolError`.
+* Overlapping cooldowns compose by **latest expiry**.  If an account freeze
+  and a site freeze both apply, the request waits for whichever ends last, so
+  stacking rules can never release work early.

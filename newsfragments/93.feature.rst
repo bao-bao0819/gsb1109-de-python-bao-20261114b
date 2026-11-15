@@ -1,0 +1,11 @@
+Add a deterministic crawl scheduler in ``h11._scheduler``.
+
+``Scheduler`` plans work onto a fixed pool of HTTP/1.1 connections
+(``Slot`` objects), honouring per-request priority, deadline, expected
+duration and release time. Account-, path- and site-scoped cooldowns can be
+recorded from response headers, and overlapping cooldowns compose by taking
+the latest expiry so a freeze is never lifted early. A connection is only
+reused once its response body reaches ``EndOfMessage``; headers alone keep it
+busy. ``Scheduler.replay`` applies a local event timeline reproducibly and
+reports requests that cannot finish before their deadline separately, without
+letting them consume a slot.

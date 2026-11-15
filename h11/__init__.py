@@ -31,6 +31,21 @@ from h11._state import (
 )
 from h11._util import LocalProtocolError, ProtocolError, RemoteProtocolError
 from h11._version import __version__
+from h11._scheduler import (
+    Account,
+    Cooldown,
+    CooldownRule,
+    Infeasible,
+    ReplayResult,
+    Request as CrawlRequest,
+    Round,
+    Scheduler,
+    ScheduleEntry,
+    Slot,
+    SlotState,
+    TimelineEvent,
+    cooldown_rules_from_response,
+)
 
 PRODUCT_ID = "python-h11/" + __version__
 
@@ -59,4 +74,17 @@ __all__ = (
     "ProtocolError",
     "LocalProtocolError",
     "RemoteProtocolError",
+    "Account",
+    "Cooldown",
+    "CooldownRule",
+    "CrawlRequest",
+    "Infeasible",
+    "ReplayResult",
+    "Round",
+    "Scheduler",
+    "ScheduleEntry",
+    "Slot",
+    "SlotState",
+    "TimelineEvent",
+    "cooldown_rules_from_response",
 )
