@@ -9,6 +9,7 @@ from typing import (
     Optional,
     overload,
     Tuple,
+    TYPE_CHECKING,
     Type,
     Union,
 )
@@ -43,6 +44,9 @@ from ._util import (  # Import the internal things we need
     Sentinel,
 )
 from ._writers import WRITERS, WritersType
+
+if TYPE_CHECKING:
+    from ._handover import DirectionProgress, Handover
 
 # Everything in __all__ gets re-exported as part of the h11 public API.
 __all__ = ["Connection", "NEED_DATA", "PAUSED"]
@@ -188,6 +192,18 @@ class Connection:
 
         # Holds any unprocessed received data
         self._receive_buffer = ReceiveBuffer()
+        # Number of bytes we've passed to receive_data() for the peer's
+        # direction, including bytes that are still sitting in the receive
+        # buffer. This lets us report absolute positions in the peer's stream,
+        # which is useful when replaying an offline capture.
+        self._received_bytes = 0
+        # Number of bytes turned into complete HTTP events. Unlike
+        # ``received_bytes - len(receive_buffer)`` this stays correct after a
+        # handover empties the buffer, because the handed-over bytes did not
+        # become HTTP.
+        self._consumed_bytes = 0
+        # Number of bytes emitted by send() for our direction.
+        self._sent_bytes = 0
         # If this is true, then it indicates that the incoming connection was
         # closed *after* the end of whatever's in self._receive_buffer:
         self._receive_buffer_closed = False
@@ -361,6 +377,166 @@ class Connection:
         """
         return (bytes(self._receive_buffer), self._receive_buffer_closed)
 
+    @property
+    def received_bytes(self) -> int:
+        """The total number of bytes passed to :meth:`receive_data` for the
+        peer's direction, including any bytes that are still buffered.
+
+        This is an absolute offset into the peer's byte stream: the bytes still
+        waiting in :attr:`trailing_data` start at ``received_bytes -
+        len(trailing_data[0])``. Offline capture replay can use this to record
+        exactly where in the original stream the connection is currently
+        positioned.
+        """
+        return self._received_bytes
+
+    @property
+    def trailing_data_offset(self) -> int:
+        """The absolute position in the peer's stream of the first byte in
+        :attr:`trailing_data`.
+
+        Equivalently, this is the number of bytes that h11 has consumed as HTTP
+        from the peer's stream so far. Bytes handed over to some other
+        protocol do not count as HTTP consumption.
+        """
+        return self._consumed_bytes
+
+    @property
+    def received_data_offset(self) -> int:
+        """Alias for :attr:`received_bytes`: the absolute position just past
+        the last byte passed to :meth:`receive_data`.
+        """
+        return self._received_bytes
+
+    @property
+    def switched_protocol(self) -> bool:
+        """True once a protocol switch (``101`` or successful ``CONNECT``) has
+        been confirmed for either direction.
+
+        While a switch is merely pending (``MIGHT_SWITCH_PROTOCOL``), this is
+        false: an ordinary response such as ``200 OK`` keeps the connection on
+        HTTP, so any buffered bytes still belong to an HTTP message body. Only
+        a confirmed switch makes the buffered remainder belong to the new
+        protocol.
+        """
+        return (
+            self.our_state is SWITCHED_PROTOCOL
+            or self.their_state is SWITCHED_PROTOCOL
+        )
+
+    @property
+    def peer_switched_protocol(self) -> bool:
+        """True once the peer's side of the connection has switched protocols.
+
+        This is the condition that matters for :attr:`trailing_data`: those
+        bytes arrived from the peer, so they only belong to the new protocol
+        if the peer has also moved past the HTTP handshake.
+        """
+        return self.their_state is SWITCHED_PROTOCOL
+
+    @property
+    def sent_bytes(self) -> int:
+        """Total number of bytes emitted by :meth:`send` so far."""
+        return self._sent_bytes
+
+    @property
+    def progress(self) -> "DirectionProgress":
+        """Consumption/production counters for the peer's direction."""
+        from ._handover import DirectionProgress
+
+        return DirectionProgress(
+            direction=self.their_role,
+            received=self._received_bytes,
+            consumed=self.trailing_data_offset,
+            buffered=self._received_bytes - self.trailing_data_offset,
+            sent=self._sent_bytes,
+            closed=self._receive_buffer_closed,
+        )
+
+    @property
+    def remainder(self) -> bytes:
+        """Any bytes received but not yet parsed as HTTP.
+
+        This is the first element of :attr:`trailing_data`. After a confirmed
+        protocol switch it is exactly the first batch of raw bytes belonging to
+        the new protocol.
+        """
+        return self.trailing_data[0]
+
+    @property
+    def remainder_offset(self) -> int:
+        """Absolute position of the first byte in :attr:`remainder`."""
+        return self.trailing_data_offset
+
+    def _take_handover_data(self) -> Tuple[bytes, int, int, int]:
+        """Remove and return all buffered bytes plus their stream positions.
+
+        Returns ``(data, offset, consumed, received)`` where ``offset`` and
+        ``consumed`` are the absolute position of ``data[0]`` (the number of
+        bytes already consumed as HTTP) and ``received`` is the absolute
+        position just past everything supplied to :meth:`receive_data`.
+        Taking the data empties the receive buffer, so a subsequent call
+        cannot hand the same bytes out twice.
+        """
+        data = bytes(self._receive_buffer)
+        offset = self._consumed_bytes
+        self._receive_buffer = ReceiveBuffer()
+        return data, offset, offset, self._received_bytes
+
+    def handover(self) -> "Handover":
+        """Drain complete HTTP events and hand over any upgraded bytes.
+
+        This is a convenience wrapper for offline capture replay. It repeatedly
+        calls :meth:`next_event` until parsing stops, then builds a
+        :class:`h11.Handover` snapshot containing:
+
+        - every complete HTTP event that was available;
+        - the first batch of raw upgraded bytes (only if the switch was
+          actually confirmed);
+        - absolute positions in the original stream for this direction.
+
+        If the peer answered an upgrade proposal with an ordinary response
+        (for example ``200 OK``), the connection stays on HTTP, ``data`` is
+        empty, and the caller should keep calling :meth:`next_event` and
+        :meth:`receive_data` as usual. The unparsed bytes remain in
+        :attr:`trailing_data` and are not lost.
+        """
+        from ._handover import Handover
+
+        events: List[Event] = []
+        while True:
+            event = self.next_event()
+            if event is NEED_DATA or event is PAUSED:
+                break
+            events.append(cast(Event, event))
+            if type(event) is ConnectionClosed:
+                break
+        switched = self.peer_switched_protocol
+        data = b""
+        offset = self.trailing_data_offset
+        consumed = offset
+        received = self._received_bytes
+        if switched:
+            data, offset, consumed, received = self._take_handover_data()
+        return Handover(
+            direction=self.their_role,
+            events=events,
+            data=data,
+            offset=offset,
+            consumed=consumed,
+            received=received,
+            buffered=received - consumed,
+            closed=self._receive_buffer_closed,
+            switched=switched,
+        )
+
+    # Descriptive aliases.
+    take_handover = handover
+
+    def _consume_received_bytes(self, count: int) -> None:
+        # no-op
+        pass
+
     def receive_data(self, data: bytes) -> None:
         """Add data to our internal receive buffer.
 
@@ -404,6 +580,7 @@ class Connection:
             if self._receive_buffer_closed:
                 raise RuntimeError("received close, then received more data?")
             self._receive_buffer += data
+            self._received_bytes += len(data)
         else:
             self._receive_buffer_closed = True
 
@@ -478,7 +655,9 @@ class Connection:
         if self.their_state is ERROR:
             raise RemoteProtocolError("Can't receive data when peer state is ERROR")
         try:
+            buffered_before = len(self._receive_buffer)
             event = self._extract_next_receive_event()
+            self._consumed_bytes += buffered_before - len(self._receive_buffer)
             if event not in [NEED_DATA, PAUSED]:
                 self._process_event(self.their_role, cast(Event, event))
             if event is NEED_DATA:
@@ -569,6 +748,7 @@ class Connection:
                 assert writer is not None
                 data_list: List[bytes] = []
                 writer(event, data_list.append)
+                self._sent_bytes += sum(len(chunk) for chunk in data_list)
                 return data_list
         except:
             self._process_error(self.our_role)

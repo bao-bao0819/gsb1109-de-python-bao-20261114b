@@ -16,6 +16,17 @@ from h11._events import (
     Request,
     Response,
 )
+from h11._handover import (
+    CLIENT_TO_SERVER,
+    SERVER_TO_CLIENT,
+    CaptureReplay,
+    DirectionProgress,
+    Handover,
+    HandoverReplay,
+    RecordedEvent,
+    ReplayResult,
+    replay_capture,
+)
 from h11._state import (
     CLIENT,
     CLOSED,
@@ -56,6 +67,15 @@ __all__ = (
     "SEND_RESPONSE",
     "SERVER",
     "SWITCHED_PROTOCOL",
+    "CLIENT_TO_SERVER",
+    "SERVER_TO_CLIENT",
+    "CaptureReplay",
+    "DirectionProgress",
+    "Handover",
+    "HandoverReplay",
+    "RecordedEvent",
+    "ReplayResult",
+    "replay_capture",
     "ProtocolError",
     "LocalProtocolError",
     "RemoteProtocolError",

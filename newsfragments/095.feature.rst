@@ -1,0 +1,9 @@
+Added explicit protocol-handover support for offline capture replay.
+:class:`Connection` now reports absolute per-direction stream positions
+(``received_bytes``, ``trailing_data_offset``, ``remainder``), and
+:meth:`Connection.handover` returns a :class:`Handover` record with all
+complete HTTP events plus the first raw bytes of a confirmed upgraded
+protocol. A rejected upgrade (for example a ``200 OK`` response) keeps
+reading HTTP, and the boundary byte is delivered exactly once. The new
+:class:`HandoverReplay` / ``replay_capture`` helpers replay a duplex
+capture in any chunking, including splits inside the header blank line.

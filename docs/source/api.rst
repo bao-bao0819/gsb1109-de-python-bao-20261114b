@@ -444,6 +444,14 @@ The Connection object
       :attr:`client_is_waiting_for_100_continue`.
 
    .. autoattribute:: trailing_data
+   .. autoattribute:: received_bytes
+   .. autoattribute:: trailing_data_offset
+   .. autoattribute:: remainder
+   .. autoattribute:: remainder_offset
+   .. autoattribute:: switched_protocol
+   .. autoattribute:: sent_bytes
+   .. automethod:: handover
+   .. automethod:: take_handover
 
 
 .. _error-handling:
@@ -978,6 +986,85 @@ Specifically, what h11 does is :ref:`pause <flow-control>` parsing
 incoming data at the boundary between the two protocols, and then you
 can retrieve any unprocessed data from the
 :attr:`Connection.trailing_data` attribute.
+
+Absolute stream positions
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The buffers above describe *what* is left over, but an offline capture
+also needs to know *where* the boundary is. Each
+:class:`Connection` therefore tracks how many bytes have been supplied
+for the peer's direction in total:
+
+* :attr:`Connection.received_bytes` is one past the last byte passed to
+  :meth:`~Connection.receive_data`.
+* :attr:`Connection.trailing_data_offset` is the absolute position of
+  the first byte still in :attr:`~Connection.trailing_data`; it equals
+  the number of bytes that have become complete HTTP events.
+* :attr:`Connection.remainder` is a shorthand for
+  ``trailing_data[0]``.
+
+All of these are absolute positions in the original byte stream for
+that direction, so they can be turned into capture offsets by adding
+the direction's base offset.
+
+``Connection.handover()``
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:meth:`Connection.handover` drains every complete HTTP event that is
+currently available and returns a :class:`Handover` record. The record
+contains the events, the raw bytes after them, and the absolute
+positions above. It only fills in ``data`` when the protocol switch has
+actually been confirmed. If an upgrade request receives an ordinary
+response such as ``200 OK``, the connection remains on HTTP,
+``data`` is empty, and the response body can be read normally; the
+bytes are not lost and are never both handed over and then parsed as
+HTTP.
+
+Taking a handover removes the handed-over bytes from the receive
+buffer, so the first byte after the switch cannot be delivered twice.
+The same guarantee holds when no handover is taken: the bytes simply
+remain in :attr:`~Connection.trailing_data`.
+
+.. autoclass:: Handover
+   :members:
+
+.. autoclass:: DirectionProgress
+   :members:
+
+Replaying a capture
+~~~~~~~~~~~~~~~~~~~
+
+An offline capture usually contains both directions interleaved in one
+record. :class:`HandoverReplay` feeds each chunk to the connection that
+would have received it and mirrors the resulting events into the other
+side's state machine, so that a client's ``Upgrade:`` proposal and a
+server's ``101`` response are seen by both ends even though the capture
+may not contain bytes for both directions in one chunk.
+
+.. code-block:: python
+
+   replay = h11.HandoverReplay()
+   replay.feed_client_to_server(request_bytes)
+   replay.feed_server_to_client(accept_and_first_frames)
+
+   for direction, progress in replay.progress.items():
+       print(direction, progress.received, progress.consumed)
+
+   for handover in replay.handovers:
+       print(handover.direction, handover.offset, handover.data)
+
+Chunks may be split at any byte, including inside the blank line that
+ends the header block, or supplied all at once. The first byte of the
+upgraded protocol is reported exactly once per direction, and later
+chunks for that direction are appended to the same handover record.
+
+.. autoclass:: HandoverReplay
+   :members:
+
+.. autoclass:: ReplayResult
+   :members:
+
+.. autofunction:: replay_capture
 
 
 .. _sendfile:
