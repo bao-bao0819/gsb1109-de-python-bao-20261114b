@@ -96,6 +96,56 @@ class TestCLexerNoErrors(unittest.TestCase):
         self.assertEqual(require_token(self.clex.token()).filename, "next.c")
         self.assertEqual(tokens[0].filename, "main.c")
 
+    def test_physical_coords_ignore_line_markers(self):
+        # Logical lineno/filename follow the #line markers, but the physical
+        # coordinates keep counting raw lines of the concatenated input and
+        # retain the original input filename.
+        self.clex.input(
+            '# 1 "vendor.h"\nint a;\n# 1 "vendor.h"\nint a;\n',
+            filename="bundled.i",
+        )
+        tokens = token_list(self.clex)
+        self.assertEqual(len(tokens), 6)
+
+        # First declaration: logical line 1, physical line 2.
+        first_int = tokens[0]
+        self.assertEqual(first_int.lineno, 1)
+        self.assertEqual(first_int.filename, "vendor.h")
+        self.assertEqual(first_int.phys_lineno, 2)
+        self.assertEqual(first_int.phys_filename, "bundled.i")
+
+        # The second expansion has the same logical spot but a different
+        # physical line, proving markers don't rewrite physical coordinates.
+        second_int = tokens[3]
+        self.assertEqual(second_int.lineno, 1)
+        self.assertEqual(second_int.filename, "vendor.h")
+        self.assertEqual(second_int.phys_lineno, 4)
+        self.assertEqual(second_int.phys_filename, "bundled.i")
+
+        self.assertEqual(self.clex.phys_filename, "bundled.i")
+
+    def test_physical_coords_without_markers_match_logical(self):
+        self.clex.input("int a;\nint b;", filename="plain.c")
+        tokens = token_list(self.clex)
+        for tok in tokens:
+            self.assertEqual(tok.phys_lineno, tok.lineno)
+            self.assertEqual(tok.phys_column, tok.column)
+            self.assertEqual(tok.phys_filename, tok.filename)
+
+    def test_physical_coords_excluded_from_token_equality(self):
+        base = Token("ID", "a", 1, 1, filename="vendor.h")
+        relocated = Token(
+            "ID",
+            "a",
+            1,
+            1,
+            filename="vendor.h",
+            phys_lineno=42,
+            phys_column=7,
+            phys_filename="bundled.i",
+        )
+        self.assertEqual(base, relocated)
+
     def test_integer_constants(self):
         self.assertTokensTypes("12", ["INT_CONST_DEC"])
         self.assertTokensTypes("12u", ["INT_CONST_DEC"])

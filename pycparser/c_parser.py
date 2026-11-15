@@ -7,7 +7,7 @@
 # License: BSD
 # ------------------------------------------------------------------------------
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (
     Any,
     Literal,
@@ -30,11 +30,21 @@ class Coord:
     - File name
     - Line number
     - Column number
+
+    Logical coordinates (file/line/column) are the vendor-source positions
+    reconstructed from #line markers. Physical coordinates (phys_*) point at
+    the same element inside the concatenated, preprocessed input the parser
+    actually received; #line markers never rewrite them. The physical fields
+    are optional and excluded from equality, so existing comparisons keep
+    relying only on the logical location.
     """
 
     file: str
     line: int
     column: int | None = None
+    phys_file: str | None = field(default=None, compare=False)
+    phys_line: int | None = field(default=None, compare=False)
+    phys_column: int | None = field(default=None, compare=False)
 
     def __str__(self) -> str:
         text = f"{self.file}:{self.line}"
@@ -539,7 +549,14 @@ class CParser:
         self._tokens.reset(mark)
 
     def _tok_coord(self, tok: Token) -> Coord:
-        return Coord(file=tok.filename, line=tok.lineno, column=tok.column)
+        return Coord(
+            file=tok.filename,
+            line=tok.lineno,
+            column=tok.column,
+            phys_file=tok.phys_filename,
+            phys_line=tok.phys_lineno,
+            phys_column=tok.phys_column,
+        )
 
     def _starts_declaration(self, tok: Token | None = None) -> bool:
         tok = tok or self._peek()

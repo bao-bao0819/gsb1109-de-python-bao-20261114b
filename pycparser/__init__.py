@@ -7,7 +7,7 @@
 # Eli Bendersky [https://eli.thegreenplace.net/]
 # License: BSD
 # -----------------------------------------------------------------
-__all__ = ["c_ast", "c_lexer", "c_parser"]
+__all__ = ["c_ast", "c_lexer", "c_parser", "declaration_catalog"]
 __version__ = "3.12"
 
 from subprocess import check_output

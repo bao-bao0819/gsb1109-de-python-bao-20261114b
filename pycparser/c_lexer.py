@@ -8,7 +8,7 @@
 # ------------------------------------------------------------------------------
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from string import ascii_letters, digits
 from typing import Literal, assert_never
@@ -23,6 +23,14 @@ class Token:
     lineno: int
     column: int
     filename: str
+    # Physical position inside the concatenated, preprocessed input text.
+    # #line markers rewrite lineno/filename (the logical vendor location) but
+    # never touch these fields, so a token always keeps a stable pointer back
+    # to the input it was lexed from. They are excluded from comparison so the
+    # logical-coordinate expectations of existing token tests stay intact.
+    phys_lineno: int = field(compare=False, default=1)
+    phys_column: int = field(compare=False, default=1)
+    phys_filename: str = field(compare=False, default="")
 
 
 class CLexer:
@@ -63,18 +71,25 @@ class CLexer:
         """Initialize the lexer to the given input text.
 
         filename is an optional name identifying the initial file from which the
-        input comes. The lexer may modify it if #line directives are
-        encountered.
+        input comes. The lexer may modify the logical filename if #line
+        directives are encountered; the physical input filename is preserved
+        separately on each token.
         """
         self._init_state()
         self._lexdata = text
         self._filename = filename
+        self._phys_filename = filename
 
     def _init_state(self) -> None:
         self._lexdata = ""
         self._filename = ""
+        self._phys_filename = ""
         self._pos = 0
         self._line_start = 0
+        # Physical coordinates count raw lines of the concatenated input and
+        # are never rewritten by #line directives.
+        self._phys_lineno = 1
+        self._phys_line_start = 0
         self._pending_tok: Token | None = None
         self._lineno = 1
         self._in_attribute = False
@@ -82,6 +97,11 @@ class CLexer:
     @property
     def filename(self) -> str:
         return self._filename
+
+    @property
+    def phys_filename(self) -> str:
+        """Name of the physical input; unaffected by #line directives."""
+        return self._phys_filename
 
     def token(self) -> Token | None:
         # Lexing strategy overview:
@@ -127,6 +147,8 @@ class CLexer:
                     self._lineno += 1
                     self._pos += 1
                     self._line_start = self._pos
+                    self._phys_lineno += 1
+                    self._phys_line_start = self._pos
                 case "#":
                     if _line_pattern.match(text, self._pos + 1):
                         self._pos += 1
@@ -268,9 +290,13 @@ class CLexer:
         """
         value = self._lexdata[self._pos : end]
         tok = self._make_token(kind, value, self._pos)
-        self._lineno += value.count("\n")
-        if "\n" in value:
+        newline_count = value.count("\n")
+        self._lineno += newline_count
+        if newline_count:
             self._line_start = self._pos + value.rfind("\n") + 1
+        self._phys_lineno += newline_count
+        if newline_count:
+            self._phys_line_start = self._pos + value.rfind("\n") + 1
         self._pos = end
         return tok
 
@@ -341,15 +367,44 @@ class CLexer:
 
         Expects tok_type/value and the absolute byte offset pos in the current
         input. Does not advance lexer state; callers manage _pos themselves.
-        Returns a Token with the current filename and line/column coordinates.
+        Returns a Token with the current logical (post-#line) coordinates plus
+        the physical coordinates of the same spot in the concatenated input.
         """
         column = pos - self._line_start + 1
-        tok = Token(tok_type, value, self._lineno, column, self._filename)
+        phys_column = pos - self._phys_line_start + 1
+        tok = Token(
+            tok_type,
+            value,
+            self._lineno,
+            column,
+            self._filename,
+            phys_lineno=self._phys_lineno,
+            phys_column=phys_column,
+            phys_filename=self._phys_filename,
+        )
         return tok
 
     def _error(self, msg: str, pos: int) -> None:
         column = pos - self._line_start + 1
         self.error_func(msg, self._lineno, column)
+
+    def _advance_past_directive_line(self, line_end: int) -> None:
+        """Consume the newline terminating a directive line.
+
+        #line markers rewrite the logical coordinates, but the physical line
+        counter still advances over the directive text so subsequent tokens
+        keep their true position in the concatenated input.
+        """
+        # line_end points at the terminating newline, or at end of input when
+        # the directive has no trailing newline.
+        if line_end < len(self._lexdata):
+            self._pos = line_end + 1
+            self._line_start = self._pos
+            self._phys_lineno += 1
+            self._phys_line_start = self._pos
+        else:
+            self._pos = line_end
+            self._line_start = self._pos
 
     def _handle_ppline(self) -> None:
         # Since #line directives aren't supposed to return tokens but should
@@ -400,13 +455,11 @@ class CLexer:
                     return
                 if pp_filename is not None:
                     self._filename = pp_filename
-            self._pos = line_end + 1
-            self._line_start = self._pos
+            self._advance_past_directive_line(line_end)
 
         def fail(msg: str, offset: int) -> None:
             self._error(msg, self._pos + offset)
-            self._pos = line_end + 1
-            self._line_start = self._pos
+            self._advance_past_directive_line(line_end)
 
         skip_ws()
         if pos >= line_len:
@@ -493,8 +546,10 @@ class CLexer:
             toks.append(self._make_token("PPPRAGMASTR", text[start:pos], start))
         if pos < n and text[pos] == "\n":
             self._lineno += 1
+            self._phys_lineno += 1
             pos += 1
             self._line_start = pos
+            self._phys_line_start = pos
         self._pos = pos
         return toks
 
