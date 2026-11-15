@@ -235,20 +235,78 @@ read them out:
             my_case = MyTestCase.fromelem(case)
             print(my_case.foo)
 
+Triage failure alerts across two batches
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When the failure taxonomy is revised, an old failure category may be renamed,
+split, or merged. The ``triage`` command compares an old and a new JUnit
+archive and decides, for every subscribed alert, whether it should keep
+firing (``continue``), be split (``split``), or be ended (``end``).
+
+Continuity is established only by *shared failure samples*: the same failing
+test case (identified by ``classname`` + ``name``) must appear under a
+category in both archives. Identical error text without a shared sample never
+counts. Categories are paired by their shared-sample count, all
+maximum-weight explanations are enumerated, and an alert is renewed only when
+its link appears in every optimal explanation.
+
+Categories are read either from a ``failure_category`` testcase property
+inside the XML, or from an external JSON classification file::
+
+    {
+      "old": [{"category": "A", "classname": "pkg.T", "name": "test_x"}],
+      "new": [{"category": "X", "classname": "pkg.T", "name": "test_x"}]
+    }
+
+Subscribed alerts are supplied as ``[{"alert_id": ..., "old_category": ...}]``
+(or an ``{alert_id: old_category}`` map). Without a subscriptions file, every
+old category is treated as one alert.
+
+.. code-block:: console
+
+    $ junitparser triage --old old_shard1.xml old_shard2.xml --new new_report.xml \
+        --classification categories.json \
+        --subscriptions alerts.json \
+        --evidence-dir evidence report.json
+
+The JSON report contains the weight matrix, every optimal explanation, the
+per-alert decisions with their supporting sample IDs, and the full evidence of
+each sample (occurrences in both archives with their error messages). The
+``--evidence-dir`` option additionally writes one JSON file per renewed alert,
+so each continued or split alert can be traced back to the exact samples that
+supported it. Use ``--glob`` to treat ``--old``/``--new`` values as globs, and
+a ``.md`` output path for a human-readable summary.
+
+The same workflow is available from Python:
+
+.. code-block:: python
+
+    from junitparser import triage
+
+    report = triage(
+        ["old/report.xml"],
+        ["new/report.xml"],
+        classification_file="categories.json",
+        subscriptions_file="alerts.json",
+    )
+    for decision in report.decisions:
+        print(decision.alert_id, decision.decision, decision.target_categories)
+
 Command Line
 ------------
 
 .. code-block:: console
 
     $ junitparser --help
-    usage: junitparser [-h] [-v] {merge} ...
+    usage: junitparser [-h] [-v] {merge,verify,triage} ...
 
     Junitparser CLI helper.
 
     positional arguments:
-    {merge}        command
+    {merge,verify,triage} ...
       merge        Merge Junit XML format reports with junitparser.
       verify       Return a non-zero exit code if one of the testcases failed or errored.
+      triage       Decide whether subscribed failure alerts continue, split, or end.
 
     optional arguments:
     -h, --help     show this help message and exit

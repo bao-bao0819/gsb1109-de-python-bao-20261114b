@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+### Added
+- `triage` command and `junitparser.triage` module: compare an old and a new
+  JUnit archive to decide whether subscribed failure alerts continue, split,
+  or end after a taxonomy change. Pairing uses shared failing test cases only
+  (identical error text without a shared sample is not continuity); all
+  maximum-weight explanations are enumerated and only links present in every
+  optimal explanation renew an alert. Reports and per-alert evidence files
+  keep the exact supporting samples traceable.
+
 ## [5.0.3] - 2026-08-31
 ### Fixed
 - Issue 177: Fix 177 different behavior of + and +=.
