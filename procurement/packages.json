@@ -1,0 +1,55 @@
+{
+  "required": ["Á", "Adieresis", "colon", "semicolon"],
+  "packages": [
+    {
+      "name": "pack-accents-full",
+      "cost": 40,
+      "masters": ["MutatorSansBoldCondensed", "UbuTestData"],
+      "glyphs": {
+        "acute": [],
+        "dot": [],
+        "dieresis": ["dot"]
+      }
+    },
+    {
+      "name": "pack-composite-caps",
+      "cost": 90,
+      "masters": ["MutatorSansBoldCondensed", "UbuTestData"],
+      "glyphs": {
+        "Aacute": ["A", "acute"],
+        "Adieresis": ["A", "dieresis"]
+      }
+    },
+    {
+      "name": "pack-punct-cheap-broken",
+      "cost": 5,
+      "masters": ["MutatorSansBoldCondensed", "UbuTestData"],
+      "glyphs": {
+        "colon": ["period"],
+        "semicolon": ["comma", "period"]
+      }
+    },
+    {
+      "name": "pack-punct-regular-only",
+      "cost": 30,
+      "masters": ["MutatorSansBoldCondensed"],
+      "glyphs": {
+        "comma": [],
+        "period": [],
+        "colon": ["period"],
+        "semicolon": ["comma", "period"]
+      }
+    },
+    {
+      "name": "pack-punct-full",
+      "cost": 55,
+      "masters": ["MutatorSansBoldCondensed", "UbuTestData"],
+      "glyphs": {
+        "comma": [],
+        "period": [],
+        "colon": ["period"],
+        "semicolon": ["comma", "period"]
+      }
+    }
+  ]
+}
