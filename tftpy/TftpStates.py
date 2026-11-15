@@ -204,7 +204,16 @@ class TftpState:
             # Check for end-of-file, any less than full data packet.
             if len(pkt.data) < self.context.getBlocksize():
                 log.info("End of file detected")
+                if self.context.handover is not None:
+                    # The transfer is complete. Sync, hash and reconcile the
+                    # staged content before marking the handover staged.
+                    self.context.handover = \
+                        self.context.handover_journal.complete(
+                            self.context.handover, self.context.fileobj)
                 return None
+            if self.context.handover is not None:
+                self.context.handover_journal.note_progress(
+                    self.context.handover, self.context.metrics.bytes)
 
         elif pkt.blocknumber < self.context.next_block:
             if pkt.blocknumber == 0:
@@ -409,17 +418,38 @@ class TftpStateServerRecvWRQ(TftpServerState):
             else:
                 self.context.fileobj = f
         else:
-            log.info("Opening file %s for writing" % path)
-            if os.path.exists(path):
-                # FIXME: correct behavior?
-                log.warning(
-                    "File %s exists already, overwriting..."
-                    % (self.context.file_to_transfer)
-                )
-            # FIXME: I think we should upload to a temp file and not overwrite
-            # the existing file until the file is successfully uploaded.
-            self.make_subdirs()
-            self.context.fileobj = open(path, "wb")
+            journal = self.context.handover_journal
+            if journal is not None:
+                # Stage the upload in the handover journal instead of
+                # writing the final path directly, so an interrupted
+                # transfer can never be mistaken for a complete file.
+                expected_size = None
+                if pkt.options and "tsize" in pkt.options:
+                    try:
+                        expected_size = int(pkt.options["tsize"])
+                    except (TypeError, ValueError):
+                        log.warning("Ignoring invalid tsize option %s",
+                                    pkt.options["tsize"])
+                handover = journal.begin(
+                    self.context.file_to_transfer,
+                    expected_size=expected_size,
+                    session="%s:%s" % (raddress, rport))
+                self.context.handover = handover
+                log.info("Staging upload of %s to %s",
+                         self.context.file_to_transfer, handover.staging_path)
+                self.context.fileobj = open(handover.staging_path, "wb")
+            else:
+                log.info("Opening file %s for writing" % path)
+                if os.path.exists(path):
+                    # FIXME: correct behavior?
+                    log.warning(
+                        "File %s exists already, overwriting..."
+                        % (self.context.file_to_transfer)
+                    )
+                # FIXME: I think we should upload to a temp file and not overwrite
+                # the existing file until the file is successfully uploaded.
+                self.make_subdirs()
+                self.context.fileobj = open(path, "wb")
 
         # Options negotiation.
         if sendoack:

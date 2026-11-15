@@ -12,6 +12,7 @@ directly. The TftpClient and TftpServer classes can be reached through it.
 from .TftpShared import *
 from .TftpServer import TftpServer
 from .TftpClient import TftpClient
+from .TftpHandover import TftpHandover, TftpHandoverJournal
 from . import __name__ as pkg_name
 from . import TftpContexts, TftpPacketFactory, TftpPacketTypes, TftpStates
 import sys

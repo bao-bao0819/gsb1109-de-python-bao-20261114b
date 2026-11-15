@@ -124,6 +124,8 @@ class TftpContext:
         # Flag to signal timeout error when waiting for ACK of the current block
         # and at the same time receiving duplicate ACK of previous block
         self.timeout_expectACK = False
+        # The handover record tracking this upload, if journaling is on.
+        self.handover = None
 
     def __del__(self):
         """Simple destructor to try to call housekeeping in the end method if
@@ -254,7 +256,8 @@ class TftpContextServer(TftpContext):
         dyn_file_func=None,
         upload_open=None,
         retries=DEF_TIMEOUT_RETRIES,
-        flock=True
+        flock=True,
+        handover_journal=None
     ):
         log.debug("TftpContextServer.__init__")
         super().__init__(host, port, timeout, retries, flock=flock)
@@ -265,6 +268,7 @@ class TftpContextServer(TftpContext):
         self.root = root
         self.dyn_file_func = dyn_file_func
         self.upload_open = upload_open
+        self.handover_journal = handover_journal
 
     def __del__(self):
         log.debug("TftpContextServer.__del__")

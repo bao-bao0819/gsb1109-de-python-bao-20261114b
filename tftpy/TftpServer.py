@@ -14,6 +14,7 @@ import time
 from errno import EINTR
 
 from .TftpContexts import TftpContextServer
+from .TftpHandover import TftpHandoverJournal
 from .TftpPacketFactory import TftpPacketFactory
 from .TftpPacketTypes import *
 from .TftpShared import *
@@ -38,10 +39,17 @@ class TftpServer(TftpSession):
     file-like object ready for writing or None if the path is invalid.
 
     flock is a boolean to tell the server whether to use advisory locking
-    on any real files being read or written in the upload/download."""
+    on any real files being read or written in the upload/download.
+
+    handover_dir, if given, enables a persistent handover journal for
+    uploads in that directory. Received files are staged there and tracked
+    through the states receiving, staged and registered, so a restart can
+    never mistake a half-written file for a complete one. The journal is
+    reconciled with disk when the server starts."""
 
     def __init__(self, tftproot="/tftpboot",
-                 dyn_file_func=None, upload_open=None, flock=True):
+                 dyn_file_func=None, upload_open=None, flock=True,
+                 handover_dir=None):
         self.listenip = None
         self.listenport = None
         self.sock = None
@@ -49,6 +57,7 @@ class TftpServer(TftpSession):
         self.root = os.path.abspath(tftproot)
         self.dyn_file_func = dyn_file_func
         self.upload_open = upload_open
+        self.handover_journal = None
         # A dict of sessions, where each session is keyed by a string like
         # ip:tid for the remote end.
         self.sessions = {}
@@ -80,6 +89,16 @@ class TftpServer(TftpSession):
                     log.warning("The tftproot %s is not writable" % self.root)
         else:
             raise TftpException("The tftproot does not exist.")
+        if handover_dir is not None:
+            self.handover_journal = TftpHandoverJournal(
+                handover_dir, root=self.root)
+            # Reconcile persisted handovers with the content on disk before
+            # accepting new transfers.
+            summary = self.handover_journal.recover()
+            for state, handovers in summary.items():
+                if handovers:
+                    log.info("Handover recovery: %s -> %d", state,
+                             len(handovers))
 
     def listen(
         self,
@@ -182,6 +201,7 @@ class TftpServer(TftpSession):
                             self.dyn_file_func,
                             self.upload_open,
                             retries=retries,
+                            handover_journal=self.handover_journal,
                         )
                         try:
                             self.sessions[key].start(buffer)
