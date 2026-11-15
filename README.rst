@@ -235,25 +235,84 @@ read them out:
             my_case = MyTestCase.fromelem(case)
             print(my_case.foo)
 
+Plan a worst-case recheck table
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Given historical JUnit results, a build window and a number of parallel device
+slots, ``junitparser.recheck`` picks which failing cases to re-run so that the
+plan still fits when *every* case takes the upper bound of its recorded
+duration. It never substitutes a mean duration for a missing bound: a case
+without an upper bound is left out, and a required case without one makes the
+plan fail with ``bottleneck="unknown_duration"``.
+
+Duration and constraint metadata is read from ``<properties>`` on each
+``<testcase>``:
+
+- ``duration_min`` / ``duration_max``: the observed duration interval in
+  seconds (also accepted as ``time_min``/``time_max``). ``time`` is used when
+  neither is present. Compressed numbers such as ``"1,234.5"`` are accepted.
+- ``failure_class`` (or ``failure_classes``): comma/semicolon-separated
+  failure classes. When absent, the ``type`` attribute of each ``<failure>``
+  or ``<error>`` is used, falling back to ``unclassified``.
+- ``device`` (or ``device_slot``): a dedicated device the case occupies
+  exclusively.
+- ``required`` (``true``/``1``/``yes``): the case must run.
+- ``depends_on`` (or ``prerequisites``): cases that must finish first.
+
+.. code-block:: python
+
+    from junitparser.recheck import plan_recheck, format_plan
+
+    result = plan_recheck(
+        ["history.xml"],
+        window=12 * 60,
+        slots=4,
+        weights={"timeout": 10, "assertion": 6, "flaky": 3},
+    )
+    print(format_plan(result))
+
+Coverage credit is deduplicated per failure class: if two selected rows cover
+the same class, that class is credited once. Required cases claim their classes
+first so an optional row cannot take credit for what was going to run anyway.
+
+If the required cases alone do not fit, the result is infeasible and
+``bottleneck`` says which constraint binds:
+
+- ``prerequisite_chain``: the longest prerequisite chain of upper bounds
+  exceeds the window.
+- ``dedicated_device``: the total upper-bound load on one device exceeds the
+  window, so serialising on that device cannot fit.
+- ``slot_capacity``: total load exceeds ``slots * window``, or exhaustive
+  search proved no assignment fits.
+- ``unknown_duration``: a required case has no upper bound.
+- ``prerequisite_chain+dedicated_device``: relaxing either constraint alone
+  yields a fitting schedule, so the two interact.
+
+The necessary lower bounds are always provable. When no lower bound binds, the
+planner relaxes device exclusivity and prerequisite ordering in turn and runs
+an exact branch-and-bound check on each relaxation. ``certified`` is ``False``
+if the search hit its node limit before proving the shortfall, so the output
+never presents a heuristic guess as a proof.
+
 Command Line
 ------------
 
 .. code-block:: console
 
     $ junitparser --help
-    usage: junitparser [-h] [-v] {merge} ...
+    usage: junitparser [-h] [-v] {merge,verify,recheck} ...
 
     Junitparser CLI helper.
 
     positional arguments:
-    {merge}        command
+    {merge,verify,recheck}        command
       merge        Merge Junit XML format reports with junitparser.
       verify       Return a non-zero exit code if one of the testcases failed or errored.
+      recheck      Plan a worst-case recheck table from historical JUnit reports.
 
     optional arguments:
     -h, --help     show this help message and exit
     -v, --version  show program's version number and exit
-
 
 .. code-block:: console
 
@@ -281,6 +340,43 @@ Command Line
     optional arguments:
       -h, --help  show this help message and exit
       --glob      Treat original XML path(s) as glob(s).
+
+.. code-block:: console
+
+    $ junitparser recheck --help
+    usage: junitparser recheck [-h] [--glob] [--spec SPEC] [--window WINDOW]
+                               [--slots SLOTS] [--weight CLASS=WEIGHT]
+                               [--default-weight DEFAULT_WEIGHT]
+                               [--required CASE] [--depends CASE=DEP[,DEP]]
+                               [--device CASE=DEVICE] [--format {text,json}]
+                               paths [paths ...]
+
+    positional arguments:
+      paths                 Original XML path(s).
+
+    options:
+      --spec SPEC           JSON file supplying window, slots, weights and constraints.
+      --window WINDOW       Build window, e.g. 12m, 720s (default: 12m).
+      --slots SLOTS         Number of parallel device slots (default: 1).
+      --weight CLASS=WEIGHT
+                            Coverage weight of a failure class; repeatable.
+      --default-weight DEFAULT_WEIGHT
+                            Weight for classes not named by --weight (default: 1.0).
+      --required CASE       Case that must run regardless of coverage; repeatable.
+      --depends CASE=DEP[,DEP]
+                            Prerequisite edges; repeatable.
+      --device CASE=DEVICE  Dedicated device required by a case; repeatable.
+      --format {text,json}  Output format (default: text).
+
+Exit code is ``0`` when the plan fits, ``1`` when the mandatory cases cannot
+fit (the reason is printed), and ``2`` for invalid input. ``--format json``
+emits the same data for tooling.
+
+.. code-block:: console
+
+    $ junitparser recheck history.xml --window 12m --slots 4 \
+        --weight timeout=10 --weight assertion=6 \
+        --depends serialization=tests.parser --device io=tests.parser::test_big_file
 
 Test
 ----

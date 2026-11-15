@@ -55,7 +55,7 @@ class Test_CommandlineOptions:
         with pytest.raises(SystemExit) as e:
             self.parser.parse_args(["--help"])
         captured = capsys.readouterr()
-        assert "{merge,verify} ...\n" in captured.out
+        assert "{merge,verify,recheck} ...\n" in captured.out
         assert e.value.code == 0
 
     @pytest.mark.parametrize("command", ["merge", "verify"])
