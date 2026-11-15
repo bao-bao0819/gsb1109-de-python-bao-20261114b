@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+### Added
+- `ShardReportStore` for ingesting JUnit reports per shard and version, with
+  full-replace vs. partial-append modes, same-version conflict evidence
+  retention, stale-report safety (older reports cannot resurrect withdrawn
+  cases), adjacent-version failure-count diffs, and order-independent
+  reconciliation across shards.
+
 ## [5.0.3] - 2026-08-31
 ### Fixed
 - Issue 177: Fix 177 different behavior of + and +=.

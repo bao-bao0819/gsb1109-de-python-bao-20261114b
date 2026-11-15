@@ -130,6 +130,44 @@ You have two or more XML files, and you want to merge them into one.
 Note that it won't check for duplicate entries. You need to deal with them on
 your own.
 
+Aggregate versioned per-shard reports
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When a day's results arrive one device (shard) at a time, the same shard may
+deliver an incomplete report first and a completed or corrected report later.
+:class:`ShardReportStore` accepts JUnit reports keyed by shard and version,
+keeps every report as evidence, and folds them in version order.
+
+.. code-block:: python
+
+    from junitparser import JUnitXml, ReportMode, ShardReportStore
+
+    store = ShardReportStore()
+    # A full report replaces the shard's case set; missing cases are withdrawn.
+    store.ingest_file("device-1", "1", "day1-v1.xml")
+    # A partial delivery can append cases instead of replacing them.
+    store.ingest_file("device-1", "2", "day1-v2.xml", mode=ReportMode.APPEND)
+
+    # Why did the failure count change between adjacent versions?
+    change = store.failure_diff("device-1")
+    print("\n".join(change.reasons()))
+
+    # Merge every shard's effective state into one report.
+    store.write_reconciled("reconciled.xml")
+
+Same shard and version with different content never overwrites anything: both
+copies are retained and listed by ``store.conflicts()``. Reports that arrive
+late with an older version cannot resurrect a case a newer REPLACE report
+withdrew, because the fold always follows version order. As a result, feeding
+the same group of reports in reverse order reconciles to identical per-shard
+counts:
+
+.. code-block:: python
+
+    forward = merge_shard_reports(entries)
+    reverse = merge_shard_reports(reversed(entries))
+    assert forward.reconcile_stats() == reverse.reconcile_stats()
+
 Schema Support
 ~~~~~~~~~~~~~~~
 
