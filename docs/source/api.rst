@@ -1096,3 +1096,74 @@ Again, it is *strongly encouraged* that you avoid relying on this information
 if at all possible. This functionality should be considered an escape hatch for
 when there is no alternative but to rely on the information, rather than a
 general source of data that is worth relying on.
+
+
+.. _range-capture-coverage:
+
+Reconstructing an object from a range capture
+---------------------------------------------
+
+.. versionadded:: 0.17.0
+
+Historical crawls often store the same object as a mix of partial
+(``206``) responses and a retry that eventually returned the whole
+representation (``200``). :mod:`h11.coverage` turns such a capture into a
+coverage table instead of concatenating bodies blindly. It never invents
+bytes: every reported interval comes from a stored response whose version
+could be proven.
+
+.. module:: h11.coverage
+
+.. autoclass:: ByteRange
+
+.. autoclass:: CapturedResponse
+
+.. autofunction:: parse_response_capture
+
+   A raw capture may hold several responses from one persistent connection.
+   Informational responses are skipped and a final close-delimited body is
+   accepted. Truncated or malformed input raises :class:`CaptureParseError`
+   rather than being guessed at.
+
+.. autofunction:: analyze
+
+.. autofunction:: analyze_capture
+
+.. autoclass:: CoverageReport
+   :members: assemble, format_table, to_dict
+
+.. autoclass:: VersionCoverage
+   :members: covered_length, blocking_conflicts
+
+.. autoclass:: CoverageShard
+
+.. autoclass:: Conflict
+
+.. autoclass:: CaptureParseError
+
+.. autoclass:: IncompleteCoverageError
+
+The rules the analysis follows:
+
+* A **strong** ``ETag`` proves that two responses describe the same version,
+  so their ranges may be joined. A whole ``200`` response is a complete
+  snapshot of its own version.
+* A **weak** ``ETag`` or ``Last-Modified`` is reported as evidence but never
+  proves that ranges can be joined. If that is all a capture has, the report
+  lists the grouped ranges as an unproven candidate, with gaps and
+  disagreements, but refuses to publish a stitched object.
+* Overlapping ranges that disagree produce a :class:`Conflict` whose
+  ``differences`` are the exact sub-intervals where the bytes differ, not the
+  whole overlap.
+* Once a whole object is present, every older shard is compared with it
+  byte-for-byte. A matching shard is marked as validated by that object; a
+  mismatching shard is rejected and the differing intervals are reported.
+  The report then lists which intervals are still missing before the version
+  can be published.
+
+For command-line use::
+
+   python -m h11.coverage_cli capture.bin --length 12345 --output object.bin
+
+The command prints the coverage table (or ``--json``) and only writes the
+output file when a complete, proven version exists.

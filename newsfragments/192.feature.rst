@@ -1,0 +1,8 @@
+Add :mod:`h11.coverage` for rebuilding an archived object from a historical
+capture that mixes partial (``206``) responses with a retry that returned the
+whole representation (``200``). The analysis proves versions with strong
+validators, refuses to stitch ranges on weak ``ETag``/``Last-Modified``
+evidence alone, reports overlapping disagreements at the exact differing byte
+intervals, validates older shards against a whole object, and lists the
+intervals still missing before a complete version can be published. A
+``python -m h11.coverage_cli`` command exposes the same report.
