@@ -87,6 +87,7 @@ Example --signalNameFromAttrib SysSignalName\nARXML known Attributes: SysSignalN
 @click.option('--warnSignalMinMaxSame/--no-warnSignalMinMaxSame', 'warnSignalMinMaxSame', default = False, help="if warnSignalMinMaxSame is set, then signals consisting same raw min & max value will be warned. \tdefault: False ")
 @click.option('--checkSignalUnit/--no-checkSignalUnit', 'checkSignalUnit', default = False, help="if checkSignalUnit is set , then signals without units and value table will be warned. \tdefault: False")
 @click.option('--checkSignalReceiver/--no-checkSignalReceiver', 'checkSignalReceiver', default = False, help="if checkSignalReceiver is set, then signals without an assigned Receiver will be warned \tdefault: False")
+@click.option('--checkSignalConflicts/--no-checkSignalConflicts', 'checkSignalConflicts', default = False, help="if checkSignalConflicts is set, signals whose physical payload bits overlap and which can be active at the same time will be reported \tdefault: False")
 @click.option('--checkFloatingSignals/--no-checkFloatingSignals', 'checkFloatingSignals', default = False, help="if checkFloatingSignals is set, then unassigned signals to a frame/message will be warned \tdefault: False")
 
 

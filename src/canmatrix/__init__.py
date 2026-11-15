@@ -32,3 +32,11 @@ from .exceptions import (
 
 # keep 1.2 behavior: submodules usable via the package namespace
 from . import cancluster, formats  # noqa: F401
+from .check import (  # noqa: F401
+    frame_conflicts,
+    matrix_conflicts,
+    SignalConflict,
+    check_frame,
+    check_matrix,
+    check_signal_conflicts,
+)

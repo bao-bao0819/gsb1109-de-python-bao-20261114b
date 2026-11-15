@@ -266,6 +266,25 @@ this will set frame-type of  ``myFrame`` and ``myFrame2`` in ``source.dbc`` to C
 this will set frame-type of  ``myFrame`` and ``myFrame2`` in ``source.dbc`` to normal (not FD) and store the result in ``target.dlc``
                         list) Syntax: --unsetFrameFd=myFrame1,mySecondFrame
 
+**check signal conflicts:**
+
+::
+
+    $ canconvert --checkSignalConflicts source.dbc target.dbc
+
+This keeps the conversion behaviour unchanged but logs every pair of signals
+whose physical payload bits overlap *and* which can be active in the same
+frame at the same time. For each conflict the log lists the overlapping bit
+positions, both signals, and one selector value combination which triggers
+both signals. Signals in mutually exclusive multiplex branches are not
+reported, even when they use the same start bit. Selector ranges are
+inclusive at both declared end points; nested multiplexers contribute their
+parent selector values as well.
+
+The same report is available from Python via
+``canmatrix.check.matrix_conflicts(matrix)``, ``matrix.signal_conflicts()``,
+or ``frame.signal_conflicts()``.
+
 
 Extract and Merge:
 __________________

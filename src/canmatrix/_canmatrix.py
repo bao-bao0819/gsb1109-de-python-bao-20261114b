@@ -753,6 +753,15 @@ class CanMatrix(object):
         else:
             return {}
 
+    def signal_conflicts(self):  # type: () -> typing.Sequence
+        """Return all physical signal conflicts of all frames."""
+        import canmatrix.check
+        return canmatrix.check.matrix_conflicts(self)
+
+    def check_conflicts(self):  # type: () -> typing.Sequence
+        """Alias for :meth:`signal_conflicts`."""
+        return self.signal_conflicts()
+
     def enum_attribs_to_values(self):  # type: () -> None
         for define in self.ecu_defines:
             if self.ecu_defines[define].type == "ENUM":

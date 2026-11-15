@@ -59,6 +59,12 @@ _______
 .. automodule:: canmatrix.copy
     :members:
 
+check.py
+________
+
+.. automodule:: canmatrix.check
+    :members:
+
 j1939_decoder.py
 ________________
 

@@ -885,6 +885,15 @@ class Frame(object):
             if signal.multiplex is not None:
                 signal.muxer_for_signal = multiplexor.name
 
+    def signal_conflicts(self):
+        """Return physical bit collisions which can occur in this frame."""
+        import canmatrix.check
+        return canmatrix.check.frame_conflicts(self)
+
+    def check_conflicts(self):
+        """Alias for :meth:`signal_conflicts`."""
+        return self.signal_conflicts()
+
     def __str__(self):  # type: () -> str
         """Represent the frame by its name only."""
         return self.name  # add more details than the name only?

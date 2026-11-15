@@ -26,6 +26,7 @@ import typing
 from builtins import *
 
 import canmatrix
+import canmatrix.check
 import canmatrix.copy
 import canmatrix.formats
 import canmatrix.log
@@ -324,6 +325,11 @@ def convert(infile, out_file_name, **options):  # type: (str, str, **str) -> Non
                 for signal in frame:
                     if signal.unit == "" and len(signal.values) == 0:
                         logger.warning("Please add value table for the signal %s or add appropriate Unit", (frame.name+"::"+signal.name))
+
+        # Check for Signals which physically overlap and can be active together
+        if options.get('checkSignalConflicts') is not None and options['checkSignalConflicts']:
+            for conflict in canmatrix.check.matrix_conflicts(db):
+                logger.warning("Signal conflict: %s", conflict)
 
         # Convert dbc from J1939 to Extended format
         if options.get('convertToExtended') is not None and options['convertToExtended']:
