@@ -62,6 +62,8 @@ from intelhex import (
     BadAccess16bit,
     hex2bin,
     Record,
+    RecordHeader,
+    RecordHeaderMatch,
     )
 from intelhex import compat
 from intelhex.compat import (
@@ -1052,6 +1054,197 @@ class TestIntelHexGetPutString(TestIntelHexBase):
         self.assertEqual(-1, self.ih.find(asbytes('\x0a'), start=3, end=7))
         self.assertEqual(-1, self.ih.find(asbytes('\x02\x01'), start=3, end=7))
         self.assertEqual(-1, self.ih.find(asbytes('\x08\x07'), start=3, end=7))
+
+
+class TestRecordHeader(unittest.TestCase):
+
+    def test_fixed_pattern(self):
+        h = RecordHeader(asbytes('\xAA\xBB'))
+        self.assertEqual(2, len(h))
+        self.assertEqual([0xAA, 0xBB], h._fixed)
+        self.assertEqual([None, None], h._groups)
+
+    def test_wildcard_positions(self):
+        h = RecordHeader([0xAA, None, 0xCC])
+        self.assertEqual([0xAA, None, 0xCC], h._fixed)
+        self.assertEqual(3, len(h))
+
+    def test_equal_positions(self):
+        h = RecordHeader([0xAA, None, 0xCC, None], [(1, 3)])
+        self.assertEqual([None, 0, None, 0], h._groups)
+
+    def test_equal_positions_with_fixed_bytes(self):
+        h = RecordHeader([0xAA, 0x55, None, 0x55], [(1, 3)])
+        self.assertEqual([None, 0, None, 0], h._groups)
+
+    def test_equal_positions_conflicting_fixed_bytes(self):
+        self.assertRaises(ValueError, RecordHeader,
+                          [0xAA, 0x55, None, 0x66], [(1, 3)])
+
+    def test_position_in_several_groups(self):
+        self.assertRaises(ValueError, RecordHeader,
+                          [0xAA, None, None], [(0, 1), (1, 2)])
+
+    def test_position_outside_header(self):
+        self.assertRaises(ValueError, RecordHeader,
+                          [0xAA, None], [(0, 2)])
+
+    def test_bad_byte_value(self):
+        self.assertRaises(ValueError, RecordHeader, [256])
+
+    def test_empty_header(self):
+        self.assertRaises(ValueError, RecordHeader, asbytes(''))
+
+    def test_repr(self):
+        h = RecordHeader([0xAA, None, 0xCC], [(0, 1)])
+        self.assertEqual("RecordHeader('AA*CC', equal: 0=1)", repr(h))
+
+
+class TestIntelHexFindHeader(TestIntelHexBase):
+
+    def setUp(self):
+        # two occupied segments with a hole between them:
+        # 0..3 and 8..11 (hole at 4..7)
+        self.ih = IntelHex()
+        self.ih.puts(0, asbytes('\xAA\xBB\xCC\xDD'))
+        self.ih.puts(8, asbytes('\xAA\xBB\xCC\xDD'))
+
+    def test_certain_match_inside_one_segment(self):
+        h = RecordHeader([0xAA, 0xBB])
+        matches, pending = self.ih.find_matching_headers(h, start=0, end=4)
+        self.assertEqual([0], [m.address for m in matches])
+        self.assertEqual([], pending)
+        self.assertTrue(matches[0].certain)
+        self.assertEqual([], matches[0].missing_bytes)
+        matches, pending = self.ih.find_matching_headers(h, start=8, end=12)
+        self.assertEqual([8], [m.address for m in matches])
+        self.assertEqual([], pending)
+
+    def test_bytes_pattern_without_wildcard(self):
+        matches, pending = self.ih.find_matching_headers(
+            asbytes('\xCC\xDD'), start=0, end=4)
+        self.assertEqual([2], [m.address for m in matches])
+        self.assertEqual([], pending)
+
+    def test_wildcard_matches_any_known_byte(self):
+        h = RecordHeader([0xAA, None])
+        matches, pending = self.ih.find_matching_headers(h, start=0, end=4)
+        self.assertEqual([0], [m.address for m in matches])
+        self.assertEqual([], pending)
+
+    def test_contradicting_known_byte_is_dropped(self):
+        h = RecordHeader([0xAA, 0x00])
+        # limited to the fully-known segment: contradictions never become
+        # pending read requests
+        matches, pending = self.ih.find_matching_headers(h, start=0, end=4)
+        self.assertEqual([], matches)
+        self.assertEqual([], pending)
+
+    def test_header_spanning_two_segments_is_pending(self):
+        # header at address 2 covers 2,3 (known) and 4,5 (hole)
+        h = RecordHeader([0xCC, 0xDD, None, None])
+        matches, pending = self.ih.find_matching_headers(h, start=0, end=7)
+        self.assertEqual([], matches)
+        self.assertEqual(1, len(pending))
+        p = pending[0]
+        self.assertEqual(2, p.address)
+        self.assertEqual([(4, 6)], p.missing_ranges)
+        self.assertEqual([4, 5], p.missing_bytes)
+        self.assertFalse(p.certain)
+
+    def test_segments_are_not_concatenated(self):
+        # position 6 would be a certain match only if segments were glued
+        # together as continuous addresses; positions 5 and 7 are dropped
+        # because their known bytes contradict the fixed pattern
+        h = RecordHeader([None, None, 0xAA, 0xBB])
+        matches, pending = self.ih.find_matching_headers(h)
+        self.assertEqual([], matches)
+        self.assertEqual([2, 3, 4, 6],
+                         [m.address for m in pending])
+        self.assertNotIn(6, [m.address for m in matches])
+
+    def test_pending_dropped_when_known_bytes_contradict(self):
+        # at position 2 the known prefix is CC DD, pattern asks for 00 ...
+        h = RecordHeader([0x00, 0xDD, None, None])
+        matches, pending = self.ih.find_matching_headers(h, start=0, end=7)
+        self.assertEqual([], matches)
+        self.assertEqual([], pending)
+
+    def test_equal_value_group_known_and_equal(self):
+        ih = IntelHex()
+        ih.puts(0, asbytes('\x11\x22\x11'))
+        h = RecordHeader([None, 0x22, None], [(0, 2)])
+        matches, pending = ih.find_matching_headers(h)
+        self.assertEqual([0], [m.address for m in matches])
+        self.assertEqual([], pending)
+
+    def test_equal_value_group_known_but_contradicting(self):
+        ih = IntelHex()
+        ih.puts(0, asbytes('\x11\x22\x33'))
+        h = RecordHeader([None, 0x22, None], [(0, 2)])
+        matches, pending = ih.find_matching_headers(h)
+        self.assertEqual([], matches)
+        self.assertEqual([], pending)
+
+    def test_equal_value_group_with_missing_member_is_pending(self):
+        # at position 1: known bytes BB CC DD at 1..3, byte 4 missing;
+        # group members at offsets 0 and 3 -> only one known value, open
+        h = RecordHeader([0xBB, 0xCC, 0xDD, None], [(0, 3)])
+        matches, pending = self.ih.find_matching_headers(h, start=1, end=5)
+        self.assertEqual([], matches)
+        self.assertEqual([1], [m.address for m in pending])
+        self.assertEqual([(4, 5)], pending[0].missing_ranges)
+        matches, pending = self.ih.find_matching_headers(h, start=9, end=13)
+        self.assertEqual([9], [m.address for m in pending])
+        self.assertEqual([(12, 13)], pending[0].missing_ranges)
+
+    def test_equal_value_group_both_members_missing(self):
+        # at position 3: byte at 3 (DD, known), 4..6 (hole);
+        # group (1,2) members both missing, constraint stays open
+        h = RecordHeader([0xDD, None, None, None], [(1, 2)])
+        matches, pending = self.ih.find_matching_headers(h, start=0, end=7)
+        self.assertEqual([3], [m.address for m in pending])
+        self.assertEqual([(4, 7)], pending[0].missing_ranges)
+        self.assertEqual([4, 5, 6], pending[0].missing_bytes)
+        matches, pending = self.ih.find_matching_headers(h, start=8, end=15)
+        self.assertEqual([11], [m.address for m in pending])
+        self.assertEqual([(12, 15)], pending[0].missing_ranges)
+
+    def test_search_region_bounds(self):
+        h = RecordHeader([0xAA])
+        matches, pending = self.ih.find_matching_headers(h, start=8, end=12)
+        self.assertEqual([8], [m.address for m in matches])
+
+    def test_header_cannot_extend_past_end(self):
+        h = RecordHeader([0xDD])
+        matches, pending = self.ih.find_matching_headers(h, start=0, end=4)
+        self.assertEqual([3], [m.address for m in matches])
+
+    def test_multiple_missing_ranges_in_one_candidate(self):
+        # known bytes at 0,1 and 4 and 6, holes at 2..3 and at 5
+        ih = IntelHex()
+        ih.puts(0, asbytes('\xAA\xBB'))
+        ih[4] = 0xEE
+        ih[6] = 0xFF
+        h = RecordHeader([0xAA, 0xBB, None, None, 0xEE, None, 0xFF])
+        matches, pending = ih.find_matching_headers(h, start=0, end=7)
+        self.assertEqual([], matches)
+        self.assertEqual(1, len(pending))
+        self.assertEqual(0, pending[0].address)
+        self.assertEqual([(2, 4), (5, 6)], pending[0].missing_ranges)
+        self.assertEqual([2, 3, 5], pending[0].missing_bytes)
+
+    def test_empty_object(self):
+        ih = IntelHex()
+        matches, pending = ih.find_matching_headers(RecordHeader([0xAA]))
+        self.assertEqual([], matches)
+        self.assertEqual([], pending)
+
+    def test_match_repr(self):
+        h = RecordHeader([0xAA, None])
+        matches, pending = self.ih.find_matching_headers(h)
+        self.assertEqual(
+            'RecordHeaderMatch(0x0, certain, missing=[])', repr(matches[0]))
 
 
 class TestIntelHexDump(TestIntelHexBase):

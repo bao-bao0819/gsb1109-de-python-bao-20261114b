@@ -2,6 +2,12 @@
 IntelHex releases
 *****************
 
+* Add ``IntelHex.find_matching_headers()`` method together with the
+  ``RecordHeader`` and ``RecordHeaderMatch`` classes: search for record
+  headers with wildcard (don't-care) bytes and equal-value groups across
+  holes in the data; results are split into certain matches and pending
+  matches annotated with the exact byte ranges that still need reading.
+
 * Added support for ``in`` operator to check if address is in HEX file.
 
 2.3.0 (2020-10-20)

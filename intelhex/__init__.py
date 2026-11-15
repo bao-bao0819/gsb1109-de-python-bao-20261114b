@@ -780,7 +780,7 @@ class IntelHex(object):
     def find(self, sub, start=None, end=None):
         """Return the lowest index in self[start:end] where subsection sub is found.
         Optional arguments start and end are interpreted as in slice notation.
-        
+
         @param  sub     bytes-like subsection to find
         @param  start   start of section to search within (optional)
         @param  end     end of section to search within (optional)
@@ -792,6 +792,102 @@ class IntelHex(object):
             if i != -1:
                 return start+i
         return -1
+
+    def find_matching_headers(self, header, start=None, end=None):
+        """Find record headers that may contain wildcard (don't-care) bytes.
+
+        Every possible header position inside self[start:end] is checked at
+        its real address: occupied segments separated by a hole are never
+        concatenated, so a header may span two already-read segments. The
+        answer is split in two lists:
+
+        - certain matches: every header byte is known and fits the pattern;
+        - pending matches: all known bytes fit the pattern (including the
+          equal-value groups of the header), but some header bytes still
+          have to be read. Each pending result carries the exact missing
+          byte ranges. A candidate whose known bytes contradict the pattern
+          or an equal-value group is discarded instead of being reported as
+          pending.
+
+        @param  header  RecordHeader instance, or a bytes-like pattern
+                        without wildcard positions
+        @param  start   start of the region to search within (optional)
+        @param  end     end of the region to search within, interpreted
+                        like the stop in slice notation (optional)
+        @return         tuple (matches, pending) of RecordHeaderMatch lists
+        """
+        if not isinstance(header, RecordHeader):
+            header = RecordHeader(header)
+        width = len(header)
+
+        addresses = dict_keys(self._buf)
+        if not addresses:
+            return [], []
+
+        if start is None:
+            start = addresses[0]
+        if end is None:
+            end = addresses[-1] + 1
+        if start < 0:
+            raise TypeError('start address cannot be negative')
+        if end < start:
+            return [], []
+
+        buf = self._buf
+        fixed = header._fixed
+        groups = header._groups
+        matches = []
+        pending = []
+
+        for pos in range_g(start, end - width + 1):
+            missing_ranges = []
+            gap_start = None
+            mismatch = False
+
+            for i in range_g(width):
+                value = buf.get(pos + i)
+                if value is None:
+                    if gap_start is None:
+                        gap_start = pos + i
+                    continue
+                if gap_start is not None:
+                    missing_ranges.append((gap_start, pos + i))
+                    gap_start = None
+                if fixed[i] is not None and value != fixed[i]:
+                    mismatch = True
+                    break
+            if mismatch:
+                continue
+            if gap_start is not None:
+                missing_ranges.append((gap_start, pos + width))
+
+            # equal-value groups: all already-known members of a group must
+            # carry the same byte; groups with missing members stay open and
+            # turn the candidate into a pending match instead of failing it
+            group_values = {}
+            for i in range_g(width):
+                group = groups[i]
+                if group is None:
+                    continue
+                value = buf.get(pos + i)
+                if value is None:
+                    continue
+                if group in group_values:
+                    if group_values[group] != value:
+                        mismatch = True
+                        break
+                else:
+                    group_values[group] = value
+            if mismatch:
+                continue
+
+            result = RecordHeaderMatch(header, pos, missing_ranges)
+            if missing_ranges:
+                pending.append(result)
+            else:
+                matches.append(result)
+
+        return matches, pending
 
     def dump(self, tofile=None, width=16, withpadding=False):
         """Dump object content to specified file object or to stdout if None.
@@ -1042,6 +1138,126 @@ class IntelHex16bit(IntelHex):
 
 
 #/class IntelHex16bit
+
+
+class RecordHeader(object):
+    """Pattern of a record header that may contain wildcard (don't-care) bytes.
+
+    Every header position is either a fixed byte that the memory must equal,
+    or a wildcard that matches any byte. Positions may additionally be joined
+    into equal-value groups: all bytes of one group must have the same value,
+    even when that value is not known until the memory is read. A wildcard
+    position therefore matches only if its group constraint is still
+    satisfiable by the known bytes.
+
+    @cvar WILDCARD   marker for a don't-care position in the pattern
+    """
+
+    WILDCARD = None
+
+    def __init__(self, pattern, equal_positions=()):
+        """
+        @param  pattern          bytes-like object of fixed bytes; use None
+                                 (or RecordHeader.WILDCARD) for wildcard
+                                 positions. Plain bytes describe a header
+                                 without wildcard positions.
+        @param  equal_positions  iterable of position groups that must hold
+                                 the same byte, e.g. ((1, 4),) makes the
+                                 bytes at offsets 1 and 4 equal
+        """
+        fixed = []
+        for byte in pattern:
+            if byte is None:
+                fixed.append(None)
+            else:
+                if isinstance(byte, StrType):
+                    byte = ord(byte)
+                if byte not in range_g(256):
+                    raise ValueError(
+                        'header byte should be in range 0..255 or None')
+                fixed.append(int(byte))
+        if not fixed:
+            raise ValueError('header cannot be empty')
+
+        groups = [None] * len(fixed)
+        next_group = 0
+        for group in equal_positions:
+            positions = list(group)
+            for i in positions:
+                if not isinstance(i, IntTypes) or i < 0 or i >= len(fixed):
+                    raise ValueError(
+                        'equal-position offset %r is outside the header' % (i,))
+            for i in positions:
+                if groups[i] is not None:
+                    raise ValueError(
+                        'header position %d belongs to more than one '
+                        'equal-value group' % i)
+            for i in positions:
+                groups[i] = next_group
+            next_group += 1
+
+        # fixed bytes inside one equal-value group must already agree
+        group_values = {}
+        for i, group in enumerate(groups):
+            if group is None or fixed[i] is None:
+                continue
+            if group in group_values:
+                if group_values[group] != fixed[i]:
+                    raise ValueError(
+                        'fixed bytes of equal-value group %d disagree' % group)
+            else:
+                group_values[group] = fixed[i]
+
+        self._fixed = fixed
+        self._groups = groups
+
+    def __len__(self):
+        return len(self._fixed)
+
+    def __repr__(self):
+        parts = []
+        for byte in self._fixed:
+            if byte is None:
+                parts.append('*')
+            else:
+                parts.append('%02X' % byte)
+        groups = {}
+        for i, group in enumerate(self._groups):
+            if group is not None:
+                groups.setdefault(group, []).append(i)
+        if groups:
+            equal = ', '.join('='.join(str(i) for i in positions)
+                              for positions in groups.values())
+            return 'RecordHeader(%r, equal: %s)' % (''.join(parts), equal)
+        return 'RecordHeader(%r)' % ''.join(parts)
+
+
+class RecordHeaderMatch(object):
+    """Result of a record header search at one address."""
+
+    def __init__(self, header, address, missing_ranges):
+        self.header = header
+        self.address = address
+        # list of (start, end) tuples with range semantics (end excluded)
+        self.missing_ranges = list(missing_ranges)
+
+    @property
+    def certain(self):
+        """True if every header byte is already known and matches."""
+        return not self.missing_ranges
+
+    @property
+    def missing_bytes(self):
+        """Exact addresses that still have to be read, in ascending order."""
+        addresses = []
+        for start, end in self.missing_ranges:
+            addresses.extend(range_l(start, end))
+        return addresses
+
+    def __repr__(self):
+        state = 'certain' if self.certain else 'pending'
+        return 'RecordHeaderMatch(0x%X, %s, missing=%r)' % (
+            self.address, state, self.missing_ranges)
 
 
 def hex2bin(fin, fout, start=None, end=None, size=None, pad=None):
