@@ -128,6 +128,13 @@ Pens
    :members:
    :undoc-members:
 
+Rounding analysis
+-----------------
+
+.. automodule:: ufoLib2.rounding
+   :members:
+   :undoc-members:
+
 Constants
 ---------
 

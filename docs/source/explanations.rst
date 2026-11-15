@@ -73,3 +73,58 @@ an uncomfortable amount of magic and edge-cases. What if a client itself
 adds a ``public.objectLibs`` entry for an object that differs from what is in
 that object's lib? Overwrite, ignore, error out? With the ``.objectLib``
 method, this edge case does not exist.
+
+Analyzing rounding errors when changing units-per-em
+----------------------------------------------------
+
+When coordinates are moved from one units-per-em (UPM) value to another and the
+result is stored with integer coordinates, a point in a plain glyph is
+quantized only once and typically stays well within tolerance. Points reached
+through components behave differently: the component's affine transformation
+(scale, rotation, reflection, ...) is applied to coordinates that were already
+snapped to integers in the base glyph, so a sub-unit rounding error is carried
+into every composite that uses the component and is amplified when the
+component is enlarged.
+
+The :mod:`ufoLib2.rounding` module compares two integer-coordinate pipelines,
+both evaluated in the final composite glyph coordinate system of the target
+UPM:
+
+* **direct rounding** rounds the exact transformed point once, directly in the
+  final coordinate system;
+* **local-first rounding** rounds at every nesting level, applies the component
+  transform and rounds again, i.e. it snaps each glyph locally before reusing it
+  as a component.
+
+The difference between the two pipelines is reported per point together with
+the component chain that placed it, so the original source glyph stays
+traceable through nested, rotated or reflected components. Acceptance is
+reported per glyph instance rather than once for the base glyph::
+
+    from ufoLib2 import Font
+    from ufoLib2.rounding import export_rounding_report
+
+    font = Font.open("MyFont.ufo")
+    report = export_rounding_report(
+        font,
+        target_upm=2048,            # source UPM comes from font.info.unitsPerEm
+        tolerance=1.0,              # max accepted point offset, target UPM units
+        csv_path="rounding-errors.csv",
+        json_path="rounding-errors.json",
+        failing_only=True,          # CSV keeps only the glyphs that fail
+    )
+
+    for glyph_report in report.failingGlyphs:
+        worst = glyph_report.worstPoint
+        print(
+            glyph_report.glyphName,
+            glyph_report.maxPointOffset,
+            worst.componentChain,    # e.g. ("agrave", "a")
+        )
+
+:func:`~ufoLib2.rounding.analyze_layer_rounding` works directly on a
+:class:`.Layer` when the source UPM is not stored in the font info, and
+:class:`~ufoLib2.rounding.LayerRoundingReport` exposes the same data
+programmatically. A component graph that references itself raises
+:class:`.CircularReferenceError`; a component that points at a missing glyph
+raises ``KeyError``.
