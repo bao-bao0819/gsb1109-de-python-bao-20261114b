@@ -15,6 +15,8 @@ from .Ecu import Ecu
 from .Endpoint import Endpoint
 from .Frame import Frame
 from .Pdu import Pdu
+from .PduContainerSplit import PduContainerSplit
+from .PduSlice import PduSlice
 from .Signal import Signal
 from .SignalGroup import SignalGroup
 from .exceptions import (

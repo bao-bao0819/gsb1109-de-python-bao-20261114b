@@ -275,3 +275,100 @@ def test_decoding_between_multiplexed_and_container_pdu():
     decoded = new_frame.decode(data)
     assert decoded["s11"].raw_value == 125
     assert decoded["s12"].raw_value == 200
+
+
+def _container_frame():
+    frame = Frame(
+        arbitration_id=ArbitrationId(id=10, extended=False),
+        name="container",
+    )
+    s1 = Signal(
+        name="Header_ID",
+        size=24,
+        is_signed=False,
+        is_little_endian=False,
+    )
+    s1.set_startbit(7, bitNumbering=1)
+    s2 = Signal(
+        name="Header_DLC",
+        size=8,
+        is_signed=False,
+        is_little_endian=False,
+    )
+    s2.set_startbit(7+24, bitNumbering=1)
+    frame.add_signal(s1)
+    frame.add_signal(s2)
+    frame.add_pdu(Pdu(name="pdu1", id=10, size=2))
+    frame.add_pdu(Pdu(name="pdu2", id=11, size=2))
+    return frame
+
+
+def test_split_pdu_container_rows_with_duplicate_ids():
+    frame = _container_frame()
+    data = bytearray([0, 0, 10, 2, 10, 13, 0, 0, 11, 2, 25, 30, 0, 0, 10, 2, 1, 2])
+    split = frame.split_pdu_container(data)
+    assert split.truncated_at is None
+    assert len(split.records) == 3
+    for i, record in enumerate(split.records):
+        assert record.frame is frame
+        assert record.sequence == i
+    # same pdu id twice in one capture -> two distinct rows
+    assert [r.pdu_id for r in split.records] == [10, 11, 10]
+    assert split.records[0].pdu is frame.pdu_by_id(10)
+    assert split.records[2].pdu is frame.pdu_by_id(10)
+    # raw byte ranges within the outer frame
+    assert (split.records[0].start_byte, split.records[0].payload_start_byte, split.records[0].end_byte) == (0, 4, 6)
+    assert (split.records[1].start_byte, split.records[1].payload_start_byte, split.records[1].end_byte) == (6, 10, 12)
+    assert (split.records[2].start_byte, split.records[2].payload_start_byte, split.records[2].end_byte) == (12, 16, 18)
+    assert split.records[0].raw == bytes([10, 13])
+    assert split.records[1].raw == bytes([25, 30])
+    assert split.records[2].raw == bytes([1, 2])
+
+
+def test_split_pdu_container_unknown_id_keeps_raw_fragment():
+    frame = _container_frame()
+    data = bytearray([0, 0, 99, 2, 0xAA, 0xBB, 0, 0, 10, 2, 10, 13])
+    split = frame.split_pdu_container(data)
+    assert split.truncated_at is None
+    assert len(split.records) == 2
+    # unknown id: raw fragment preserved, dictionary pdu is None
+    assert split.records[0].pdu is None
+    assert split.records[0].pdu_id == 99
+    assert split.records[0].raw == bytes([0xAA, 0xBB])
+    # following known record still usable
+    assert split.records[1].pdu is frame.pdu_by_id(10)
+    assert split.records[1].raw == bytes([10, 13])
+
+
+def test_split_pdu_container_truncated_last_pdu_no_resync():
+    frame = _container_frame()
+    # last header declares dlc 5 crossing the frame end; its "payload" even
+    # contains bytes looking like a known header (id 10) - must not resync
+    data = bytearray([0, 0, 10, 2, 10, 13, 0, 0, 11, 5, 0, 0, 10, 2])
+    split = frame.split_pdu_container(data)
+    # only the trustworthy prefix is delivered
+    assert len(split.records) == 1
+    assert split.records[0].pdu_id == 10
+    assert split.records[0].raw == bytes([10, 13])
+    # remainder is untrusted starting at the header of the truncated pdu
+    assert split.truncated_at == 6
+
+
+def test_split_pdu_container_trailing_padding_is_not_truncation():
+    frame = _container_frame()
+    data = bytearray([0, 0, 10, 2, 10, 13, 0xFF])
+    split = frame.split_pdu_container(data)
+    assert split.truncated_at is None
+    assert len(split.records) == 1
+    assert split.records[0].raw == bytes([10, 13])
+
+
+def test_split_pdu_container_requires_container_with_header():
+    frame = Frame(name="plain", arbitration_id=ArbitrationId(id=1, extended=False))
+    with pytest.raises(canmatrix.exceptions.DecodingContainerPdu):
+        frame.split_pdu_container(bytearray([0] * 8))
+    container = Frame(name="static", arbitration_id=ArbitrationId(id=2, extended=False))
+    container.add_pdu(Pdu(name="pdu", id=1, size=2))
+    with pytest.raises(canmatrix.exceptions.DecodingContainerPdu):
+        container.split_pdu_container(bytearray([0] * 8))
+

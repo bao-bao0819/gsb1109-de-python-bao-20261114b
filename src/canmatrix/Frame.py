@@ -42,6 +42,8 @@ from canmatrix.Signal import Signal
 from canmatrix.exceptions import EncodingContainerPdu, DecodingContainerPdu, DecodingFrameLength
 from canmatrix.ArbitrationId import ArbitrationId
 from canmatrix.Pdu import Pdu
+from canmatrix.PduContainerSplit import PduContainerSplit
+from canmatrix.PduSlice import PduSlice
 from canmatrix.exceptions import EncodingComplexMultiplexed, MissingMuxSignal, DecodingContainerPdu
 from canmatrix.types import RawValue
 
@@ -745,6 +747,82 @@ class Frame(object):
                 return_dict[s.name] = DecodedSignal(v, s)
 
             return return_dict
+
+    def split_pdu_container(self, data):
+        # type: (typing.Union[bytes, bytearray]) -> PduContainerSplit
+        """Split a captured container-frame payload into one slice per contained PDU.
+
+        Walks the PDU headers (Header_ID/Header_DLC) of the container and
+        returns a `PduContainerSplit` with one `PduSlice` row per PDU
+        occurrence, in order of appearance. Each slice points back to this
+        frame and carries the raw byte range of the PDU in `data`, so
+        duplicate PDU ids within one capture are kept as distinct rows.
+
+        A PDU id that is unknown to the dictionary does not abort splitting:
+        if its declared length stays inside the frame, the raw fragment is
+        kept (slice with `pdu` set to None) and following PDUs are still
+        sliced. If a declared PDU length crosses the end of the frame, the
+        trustworthy prefix collected so far is returned and `truncated_at`
+        marks the byte offset from which the remainder is untrusted; the
+        rest of the payload is not re-scanned, even if a known PDU id
+        happens to appear in it. Trailing bytes too short for a further
+        header are treated as padding.
+
+        :param data: captured frame payload
+        :return: PduContainerSplit with the slice rows and truncation offset
+        """
+        if not self.is_pdu_container:
+            raise DecodingContainerPdu(
+                'Received message 0x{:08X} is no PDU-Container.'.format(self.arbitration_id.id)
+            )
+        header_id_signal = self.signal_by_name("Header_ID")
+        header_dlc_signal = self.signal_by_name("Header_DLC")
+        if header_id_signal is None or header_dlc_signal is None:
+            raise DecodingContainerPdu(
+                'Received message 0x{:08X} with incorrect Header-Defintiion. '
+                'Header_ID signal or Header_DLC is missing'.format(self.arbitration_id.id)
+            )
+        header_signals = [header_id_signal, header_dlc_signal]
+        header_size = header_id_signal.size + header_dlc_signal.size
+        offset = header_id_signal.start_bit
+        if offset % 8 != 0 or header_size % 8 != 0:
+            raise DecodingContainerPdu(
+                'Received message 0x{:08X} with a PDU-Header that is not byte aligned.'.format(
+                    self.arbitration_id.id)
+            )
+        header_bytes = header_size // 8
+        little, big = self.bytes_to_bitstrings(data)
+        size = len(data) * 8
+        split = PduContainerSplit()
+        while offset + header_size <= size:
+            unpacked = self.bitstring_to_signal_list(
+                header_signals,
+                big[offset:offset + header_size],
+                little[size - offset - header_size:size - offset],
+                header_size
+            )
+            pdu_id = int(unpacked[0])
+            pdu_dlc = int(unpacked[1])
+            start_byte = offset // 8
+            payload_start_byte = start_byte + header_bytes
+            end_byte = payload_start_byte + pdu_dlc
+            if end_byte > len(data):
+                # declared length crosses the outer frame: everything from
+                # this PDU on is untrusted, do not resync inside the payload
+                split.truncated_at = start_byte
+                break
+            split.records.append(PduSlice(
+                frame=self,
+                sequence=len(split.records),
+                pdu_id=pdu_id,
+                pdu=self.pdu_by_id(pdu_id),
+                start_byte=start_byte,
+                payload_start_byte=payload_start_byte,
+                end_byte=end_byte,
+                raw=bytes(data[payload_start_byte:end_byte]),
+            ))
+            offset += header_size + pdu_dlc * 8
+        return split
 
     def _get_sub_multiplexer(self, parent_multiplexer_name, parent_multiplexer_value):
         """
