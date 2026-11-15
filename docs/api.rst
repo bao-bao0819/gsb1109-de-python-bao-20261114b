@@ -188,3 +188,17 @@ You can enable this output in your application with::
     logging.basicConfig(level=logging.DEBUG)
     # optionally restrict musicbrainzngs output to INFO messages
     logging.getLogger("musicbrainzngs").setLevel(logging.INFO)
+
+Merging Partial Rankings
+------------------------
+
+These helpers merge the partial search-result rankings that several
+sources ("halls") hand in and compute, for every recording, the range
+of merged ranks it can still reach over all legal completions.
+
+.. autoclass:: PartialRanking
+   :members:
+
+.. autofunction:: merged_rank_ranges
+
+.. autoclass:: RankRange
