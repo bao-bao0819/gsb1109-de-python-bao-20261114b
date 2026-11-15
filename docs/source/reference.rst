@@ -135,6 +135,43 @@ Constants
    :members:
    :undoc-members:
 
+Glyph catalog
+-------------
+
+.. automodule:: ufoLib2.catalog
+   :members:
+   :undoc-members:
+
+.. autoclass:: ufoLib2.catalog.model.GlyphRecord
+   :members:
+   :undoc-members:
+
+.. autoclass:: ufoLib2.catalog.model.Catalog
+   :members:
+   :undoc-members:
+
+.. autoclass:: ufoLib2.catalog.model.CandidateGroup
+   :members:
+   :undoc-members:
+
+.. autoclass:: ufoLib2.catalog.model.Conflict
+   :members:
+   :undoc-members:
+
+.. autoclass:: ufoLib2.catalog.input.SourceSpec
+   :members:
+   :undoc-members:
+
+.. autofunction:: ufoLib2.catalog.input.load_source
+
+.. autofunction:: ufoLib2.catalog.input.normalize_stable_ids
+
+.. autofunction:: ufoLib2.catalog.input.normalize_manual_mapping
+
+.. autofunction:: ufoLib2.catalog.resolution.resolve_catalog
+
+.. autofunction:: ufoLib2.catalog.resolution.summarize
+
 Exceptions
 ----------
 

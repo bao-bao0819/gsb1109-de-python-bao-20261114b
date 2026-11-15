@@ -12,6 +12,7 @@ See http://unifiedfontobject.org/versions/ufo3/ for the specification of the on-
    :caption: Contents:
 
    explanations
+   catalog
    reference
 
 
