@@ -187,6 +187,46 @@ to get all releases for a label::
    since web service requests are throttled.
    In the example we filter by `release_type`.
 
+Browsing with a drift-tolerant session
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The web service keeps no historical snapshot. If a new entity is inserted
+in front of an offset you already scanned, every following page shifts and
+a loop that stops at the first short page can silently miss entities.
+
+:class:`musicbrainzngs.BrowseSession` handles this. It records the ordered
+IDs at every page boundary, the IDs it has already delivered and every
+total count the server reports. After the first sweep it re-walks the
+pages: if a boundary moved, the new entities are merged and another walk
+runs, up to `max_rechecks` times. A walk in which all boundaries and the
+total stay stable proves the result complete. An entity is never delivered
+twice::
+
+  session = musicbrainzngs.BrowseSession(
+      "release", artist=artist_id, includes=["labels"],
+      release_type=["album"], max_rechecks=3)
+  result = session.collect()
+  if result["complete"]:
+      releases = result["release-list"]
+
+The session is interruptible. Pass a `threading.Event` (or any callable
+returning a boolean) to stop between page requests; calling `collect()`
+again resumes without repeating a delivered entity::
+
+  stop = threading.Event()
+  result = session.collect(cancel_event=stop)
+  if result["cancelled"]:
+      # persist and continue in another process later
+      state = session.to_dict()
+
+  later = musicbrainzngs.BrowseSession.from_dict(state)
+  result = later.collect()
+
+If the directory keeps changing until the recheck budget is spent,
+:class:`musicbrainzngs.BrowseIncomplete` is raised. Its `result` attribute
+still carries the confirmed entity set, all observed totals and the first
+unstable boundary, so nothing that was confirmed is lost.
+
 Submitting
 ----------
 

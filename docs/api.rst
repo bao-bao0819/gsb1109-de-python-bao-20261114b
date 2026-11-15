@@ -132,6 +132,21 @@ You have to provide exactly one MusicBrainz ID to these functions.
 .. autofunction:: browse_releases
 .. autofunction:: browse_urls
 
+The plain browse functions above return a single page. For a complete,
+interruptible scan that tolerates entities being inserted while paging,
+use a :class:`BrowseSession`: it records page boundary witnesses, the
+delivered IDs and every observed total, re-walks the directory until the
+boundaries are stable, and never delivers an entity twice.
+
+.. autoclass:: BrowseSession
+   :members:
+
+.. autofunction:: browse_session
+
+.. autoclass:: BrowseIncomplete
+   :show-inheritance:
+   :members:
+
 .. _api_submitting:
 
 Submitting
