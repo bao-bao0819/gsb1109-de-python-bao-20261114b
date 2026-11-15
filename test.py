@@ -16,6 +16,7 @@ import chess
 import chess.gaviota
 import chess.engine
 import chess.pgn
+import chess.pgn_timeline
 import chess.polyglot
 import chess.svg
 import chess.syzygy
@@ -2905,6 +2906,294 @@ class PgnTestCase(unittest.TestCase):
             board.push(chess.Move(chess.E7, chess.E8))
         game = chess.pgn.Game.from_board(board)
         self.assertTrue(str(game).endswith("2000. Ke1 Ke8 1/2-1/2"))
+
+    def test_timeline_single_machine(self):
+        game = chess.pgn.read_game(io.StringIO(
+            "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 "
+            "6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 Nb8 10. d4 Nbd7 *"))
+        nodes = list(game.mainline())
+
+        anchors = [
+            chess.pgn_timeline.Anchor(nodes[0], {"web": 10.0}, time=0.0, error=0.5),
+            chess.pgn_timeline.Anchor(nodes[5], {"web": 50.0}, time=40.0, error=0.5),
+            chess.pgn_timeline.Anchor(nodes[11], {"web": 100.0}, time=90.0, error=0.5),
+            chess.pgn_timeline.Anchor(nodes[17], {"web": 150.0}, time=140.0, error=0.5),
+        ]
+        comment = chess.pgn_timeline.Comment("Great move", {"web": 30.0})
+
+        report = chess.pgn_timeline.align(game, anchors, [comment])
+        self.assertTrue(report.feasible)
+        self.assertEqual(len(report.segments), 1)
+        self.assertAlmostEqual(report.segments[0].offset, -10.0)
+        self.assertAlmostEqual(report.segments[0].lower, -10.5)
+        self.assertAlmostEqual(report.segments[0].upper, -9.5)
+
+        placement = report.comments[0]
+        self.assertEqual(len(placement.ranges), 1)
+        move_range = placement.ranges["web"]
+        self.assertEqual(move_range.first.san(), "e5")
+        self.assertEqual(move_range.last.san(), "Bb5")
+        self.assertEqual(move_range.plies, (2, 5))
+        self.assertEqual(placement.possible, move_range)
+
+    def test_timeline_offset_fitted_once(self):
+        game = chess.pgn.read_game(io.StringIO(
+            "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 "
+            "6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 Nb8 10. d4 Nbd7 *"))
+        nodes = list(game.mainline())
+
+        # The last anchor requires an offset that is unreachable with the
+        # single fixed offset fitted from all anchors.
+        anchors = [
+            chess.pgn_timeline.Anchor(nodes[0], {"web": 10.0}, time=0.0, error=0.5),
+            chess.pgn_timeline.Anchor(nodes[5], {"web": 50.0}, time=40.0, error=0.5),
+            chess.pgn_timeline.Anchor(nodes[11], {"web": 100.0}, time=90.0, error=0.5),
+            chess.pgn_timeline.Anchor(nodes[17], {"web": 195.0}, time=140.0, error=0.5),
+        ]
+
+        report = chess.pgn_timeline.align(game, anchors)
+        self.assertFalse(report.feasible)
+        self.assertFalse(report.segments[0].feasible)
+        self.assertEqual([issue.reason for issue in report.anchor_issues],
+                         ["offset_conflict"])
+        issue = report.anchor_issues[0]
+        self.assertIn("9... Nb8", issue.locator)
+        self.assertIn("ply 18", issue.locator)
+
+    def test_timeline_fixed_offset_never_refitted(self):
+        game = chess.pgn.read_game(io.StringIO(
+            "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 "
+            "6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 Nb8 10. d4 Nbd7 *"))
+        nodes = list(game.mainline())
+
+        anchors = [
+            chess.pgn_timeline.Anchor(nodes[0], {"web": 10.0}, time=0.0, error=0.5),
+            chess.pgn_timeline.Anchor(nodes[19], {"web": 150.0}, time=140.0, error=0.5),
+        ]
+        segments = [chess.pgn_timeline.Segment("web", offset=-10.0, drift=1.0)]
+
+        report = chess.pgn_timeline.align(game, anchors, segments=segments)
+        self.assertTrue(report.feasible)
+        self.assertAlmostEqual(report.segments[0].offset, -10.0)
+
+        # An anchor 3 seconds off the fixed offset must not silently shift it.
+        anchors[0] = chess.pgn_timeline.Anchor(
+            nodes[0], {"web": 13.0}, time=0.0, error=0.5)
+        report = chess.pgn_timeline.align(game, anchors, segments=segments)
+        self.assertFalse(report.feasible)
+        self.assertEqual(report.anchor_issues[0].reason, "outside_offset")
+        self.assertIn("1. e4", report.anchor_issues[0].locator)
+
+    def test_timeline_recorder_change(self):
+        game = chess.pgn.read_game(io.StringIO(
+            "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 "
+            "6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 Nb8 10. d4 Nbd7 *"))
+        nodes = list(game.mainline())
+
+        segments = [
+            chess.pgn_timeline.Segment("site", end=80.0, label="recorder-1"),
+            chess.pgn_timeline.Segment("site", start=80.0, label="recorder-2"),
+        ]
+        anchors = [
+            chess.pgn_timeline.Anchor(nodes[0], {"site": 10.0}, time=0.0, error=1.0),
+            chess.pgn_timeline.Anchor(nodes[5], {"site": 52.0}, time=40.0, error=1.0),
+            chess.pgn_timeline.Anchor(nodes[11], {"site": 120.0}, time=90.0, error=1.0),
+            chess.pgn_timeline.Anchor(nodes[17], {"site": 170.0}, time=140.0, error=1.0),
+        ]
+        comments = [
+            chess.pgn_timeline.Comment("before the change", {"site": 30.0}),
+            chess.pgn_timeline.Comment("after the change", {"site": 100.0}),
+        ]
+
+        report = chess.pgn_timeline.align(game, anchors, comments, segments=segments)
+        self.assertTrue(report.feasible)
+        self.assertEqual(len(report.segments), 2)
+        self.assertAlmostEqual(report.segments[0].offset, -11.0)
+        self.assertAlmostEqual(report.segments[1].offset, -30.0)
+
+        before, after = report.comments
+        self.assertEqual(before.possible.first.san(), "e5")
+        self.assertEqual(before.possible.last.san(), "Bb5")
+        self.assertEqual(after.possible.first.san(), "Ba4")
+        self.assertEqual(after.possible.last.san(), "Re1")
+
+    def test_timeline_two_alignments(self):
+        game = chess.pgn.read_game(io.StringIO(
+            "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 "
+            "6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 Nb8 10. d4 Nbd7 *"))
+        nodes = list(game.mainline())
+
+        # The two recordings are several seconds apart, so the possible move
+        # intervals do not fully coincide.
+        anchors = [
+            chess.pgn_timeline.Anchor(nodes[0], {"web": 10.0, "site": 5.0}, time=0.0, error=0.5),
+            chess.pgn_timeline.Anchor(nodes[5], {"web": 50.0, "site": 45.0}, time=40.0, error=0.5),
+            chess.pgn_timeline.Anchor(nodes[11], {"web": 100.0, "site": 95.0}, time=90.0, error=0.5),
+        ]
+        comment = chess.pgn_timeline.Comment("Here", {"web": 74.0, "site": 73.0})
+
+        report = chess.pgn_timeline.align(game, anchors, [comment])
+        self.assertTrue(report.feasible)
+        placement = report.comments[0]
+        self.assertEqual(set(placement.ranges), {"web", "site"})
+        self.assertEqual(placement.possible.first.san(), placement.ranges["web"].first.san())
+        self.assertEqual(placement.consistent is not None, True)
+        self.assertGreaterEqual(placement.consistent.move_count, 1)
+        self.assertIn(placement.consistent, [placement.possible])
+
+    def test_timeline_two_alignments_disagree(self):
+        game = chess.pgn.read_game(io.StringIO(
+            "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 "
+            "6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 Nb8 10. d4 Nbd7 *"))
+        nodes = list(game.mainline())
+
+        anchors = [
+            chess.pgn_timeline.Anchor(nodes[0], {"web": 10.0, "site": 5.0}, time=0.0, error=0.5),
+            chess.pgn_timeline.Anchor(nodes[5], {"web": 50.0, "site": 70.0}, time=40.0, error=0.5),
+            chess.pgn_timeline.Anchor(nodes[11], {"web": 100.0, "site": 120.0}, time=90.0, error=0.5),
+        ]
+        # The site timeline cannot be fitted with one offset at all.
+        comment = chess.pgn_timeline.Comment("Here", {"web": 74.0, "site": 69.0})
+
+        report = chess.pgn_timeline.align(game, anchors, [comment])
+        self.assertFalse(report.feasible)
+        self.assertIn("[site]", str(report.anchor_issues[0]))
+        self.assertEqual(set(report.comments[0].ranges), {"web"})
+        self.assertIsNone(report.comments[0].consistent)
+
+    def test_timeline_anchor_outside_segments(self):
+        game = chess.pgn.read_game(io.StringIO("1. e4 e5 2. Nf3 Nc6 *"))
+        nodes = list(game.mainline())
+
+        segments = [
+            chess.pgn_timeline.Segment("site", end=100.0),
+            chess.pgn_timeline.Segment("site", start=150.0),
+        ]
+        anchors = [
+            chess.pgn_timeline.Anchor(nodes[0], {"site": 10.0}, time=0.0),
+            chess.pgn_timeline.Anchor(nodes[2], {"site": 165.0}, time=15.0),
+        ]
+
+        report = chess.pgn_timeline.align(game, anchors, segments=segments)
+        self.assertTrue(report.feasible)
+        self.assertEqual([fit.timeline for fit in report.segments], ["site", "site"])
+        self.assertAlmostEqual(report.segments[0].offset, -10.0)
+        self.assertAlmostEqual(report.segments[1].offset, -150.0)
+
+        comment = chess.pgn_timeline.Comment("x", {"site": 12.0})
+        report = chess.pgn_timeline.align(game, anchors, [comment], segments=segments)
+        self.assertEqual(report.comments[0].possible.first.san(), "e5")
+        self.assertEqual(report.comments[0].possible.last.san(), "e5")
+
+        # A timestamp between the machines belongs to no segment.
+        anchors.append(chess.pgn_timeline.Anchor(
+            nodes[3], {"site": 120.0}, time=50.0))
+        report = chess.pgn_timeline.align(game, anchors, segments=segments)
+        self.assertTrue(any(issue.reason == "no_segment"
+                            for issue in report.anchor_issues))
+        self.assertIn("2... Nc6", report.anchor_issues[0].locator)
+
+    def test_timeline_reference_and_report(self):
+        game = chess.pgn.read_game(io.StringIO(
+            "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 "
+            "6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 Nb8 10. d4 Nbd7 *"))
+        nodes = list(game.mainline())
+
+        # No absolute game times; "site" is used as the reference.
+        anchors = [
+            chess.pgn_timeline.Anchor(nodes[0], {"web": 10.0, "site": 5.0}),
+            chess.pgn_timeline.Anchor(nodes[5], {"web": 50.0, "site": 45.0}),
+            chess.pgn_timeline.Anchor(nodes[11], {"web": 100.0, "site": 95.0}),
+        ]
+        comment = chess.pgn_timeline.Comment("x", {"web": 60.0, "site": 55.0})
+
+        report = chess.pgn_timeline.align(game, anchors, [comment], reference="site")
+        self.assertAlmostEqual(next(fit.offset for fit in report.segments
+                                    if fit.timeline == "site"), 0.0)
+        self.assertAlmostEqual(next(fit.offset for fit in report.segments
+                                    if fit.timeline == "web"), -5.0)
+
+        data = report.to_dict()
+        self.assertEqual(set(data["comments"][0]["ranges"]), {"web", "site"})
+        text = chess.pgn_timeline.format_report(report)
+        self.assertIn("timeline web", text)
+        self.assertIn("comments:", text)
+
+    def test_timeline_non_mainline_anchor(self):
+        game = chess.pgn.read_game(io.StringIO("1. e4 e5 (1... c5) 2. Nf3 *"))
+        nodes = list(game.mainline())
+        variation = next(child for child in game.variations[0].variations
+                         if child.san() == "c5")
+
+        anchors = [
+            chess.pgn_timeline.Anchor(nodes[0], {"web": 10.0}, time=0.0),
+            chess.pgn_timeline.Anchor(variation, {"web": 20.0}, time=10.0),
+            chess.pgn_timeline.Anchor(nodes[2], {"web": 40.0}, time=30.0),
+        ]
+
+        report = chess.pgn_timeline.align(game, anchors)
+        self.assertTrue(any(issue.reason == "not_mainline"
+                            for issue in report.anchor_issues))
+        self.assertIn("1... c5", report.anchor_issues[0].locator)
+        self.assertIn("variation", report.anchor_issues[0].locator)
+
+    def test_timeline_non_monotonic_anchor(self):
+        game = chess.pgn.read_game(io.StringIO("1. e4 e5 2. Nf3 Nc6 *"))
+        nodes = list(game.mainline())
+
+        anchors = [
+            chess.pgn_timeline.Anchor(nodes[0], {"web": 10.0}, time=0.0),
+            chess.pgn_timeline.Anchor(nodes[1], {"web": 40.0}, time=30.0),
+            chess.pgn_timeline.Anchor(nodes[2], {"web": 30.0}, time=20.0),
+        ]
+
+        report = chess.pgn_timeline.align(game, anchors)
+        self.assertTrue(any(issue.reason == "non_monotonic"
+                            for issue in report.anchor_issues))
+        self.assertTrue(report.feasible)
+
+    def test_timeline_segment_overlap(self):
+        game = chess.pgn.read_game(io.StringIO("1. e4 e5 *"))
+        nodes = list(game.mainline())
+        segments = [
+            chess.pgn_timeline.Segment("site", start=10.0, end=20.0),
+            chess.pgn_timeline.Segment("site", start=15.0, end=30.0),
+        ]
+        anchors = [chess.pgn_timeline.Anchor(nodes[0], {"site": 12.0}, time=0.0)]
+
+        with self.assertRaises(ValueError):
+            chess.pgn_timeline.align(game, anchors, segments=segments)
+
+    def test_timeline_empty_and_drift(self):
+        game = chess.pgn.read_game(io.StringIO("1. e4 e5 2. Nf3 Nc6 *"))
+        nodes = list(game.mainline())
+
+        # A comment older than every anchor is before the first move.
+        anchors = [
+            chess.pgn_timeline.Anchor(nodes[0], {"web": 10.0}, time=0.0),
+            chess.pgn_timeline.Anchor(nodes[3], {"web": 40.0}, time=30.0),
+        ]
+        early = chess.pgn_timeline.Comment("early", {"web": 5.0})
+        late = chess.pgn_timeline.Comment("late", {"web": 60.0})
+
+        report = chess.pgn_timeline.align(game, anchors, [early, late])
+        self.assertIsNone(report.comments[0].possible.first.move)
+        self.assertEqual(report.comments[0].possible.plies, (0, 0))
+        self.assertEqual(report.comments[1].possible.first.san(), "Nc6")
+        self.assertEqual(report.comments[1].possible.last.san(), "Nc6")
+
+        # The constant drift widens the interval but remains one fixed offset.
+        segments = [chess.pgn_timeline.Segment("web", drift=5.0)]
+        anchors = [
+            chess.pgn_timeline.Anchor(nodes[0], {"web": 10.0}, time=0.0, error=0.5),
+            chess.pgn_timeline.Anchor(nodes[3], {"web": 50.0}, time=40.0, error=0.5),
+        ]
+        report = chess.pgn_timeline.align(game, anchors, segments=segments)
+        self.assertTrue(report.feasible)
+        # Anchor 0 alone allows -15.5..-4.5, anchor 3 alone allows -15.5..-4.5.
+        self.assertAlmostEqual(report.segments[0].lower, -15.5)
+        self.assertAlmostEqual(report.segments[0].upper, -4.5)
+        self.assertAlmostEqual(report.segments[0].offset, -10.0)
 
     def test_annotations(self):
         game = chess.pgn.Game()

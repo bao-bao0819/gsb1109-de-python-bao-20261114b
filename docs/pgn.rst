@@ -61,6 +61,31 @@ Both extend :class:`~chess.pgn.GameNode`.
 .. autoclass:: chess.pgn.ChildNode
     :members: parent, move, starting_comment, nags, san, uci, end
 
+Timeline alignment
+------------------
+
+``chess.pgn_timeline`` aligns timestamps from external recordings (for
+example a web broadcast and an on-site scoresheet with several recorder
+machines) with confirmed move nodes, and locates comments that only have a
+timestamp.
+
+Each recording machine is interpreted with one fixed offset plus the
+configured drift. The offset is fitted once from all anchors assigned to that
+machine; it is never adjusted per anchor. Anchors that cannot share a single
+offset are reported with their original PGN node locators.
+
+.. autoclass:: chess.pgn_timeline.Anchor
+.. autoclass:: chess.pgn_timeline.Comment
+.. autoclass:: chess.pgn_timeline.Segment
+.. autoclass:: chess.pgn_timeline.MoveRange
+.. autoclass:: chess.pgn_timeline.AnchorIssue
+.. autoclass:: chess.pgn_timeline.TimelineReport
+    :members: feasible, to_dict
+
+.. autofunction:: chess.pgn_timeline.align
+.. autofunction:: chess.pgn_timeline.format_report
+.. autofunction:: chess.pgn_timeline.node_locator
+
 Visitors
 --------
 
