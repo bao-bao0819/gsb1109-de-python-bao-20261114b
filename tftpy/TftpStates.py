@@ -16,6 +16,7 @@ import random
 import time
 
 from .TftpPacketTypes import *
+from .TftpReceipts import BOOT_OPTION
 from .TftpShared import *
 
 log = logging.getLogger("tftpy.TftpStates")
@@ -199,11 +200,16 @@ class TftpState:
             self.context.next_block += 1
 
             log.debug("Writing %d bytes to output file", len(pkt.data))
-            self.context.fileobj.write(pkt.data)
+            receipt = getattr(self.context, "receipt", None)
+            if receipt is not None:
+                receipt.write_block(pkt.blocknumber, pkt.data)
+            else:
+                self.context.fileobj.write(pkt.data)
             self.context.metrics.bytes += len(pkt.data)
             # Check for end-of-file, any less than full data packet.
             if len(pkt.data) < self.context.getBlocksize():
                 log.info("End of file detected")
+                self.context.transfer_complete = True
                 return None
 
         elif pkt.blocknumber < self.context.next_block:
@@ -396,12 +402,48 @@ class TftpStateServerRecvWRQ(TftpServerState):
                 else:
                     os.mkdir(current, 0o700)
 
+    @staticmethod
+    def _extract_boot_option(pkt):
+        """Pull the boot code out of a WRQ and remove it from option
+        negotiation, since it is identity metadata rather than a TFTP
+        transfer option."""
+        options = getattr(pkt, "options", None)
+        if not options:
+            return None
+        boot = None
+        kept = {}
+        for key, value in options.items():
+            if str(key).lower() == BOOT_OPTION:
+                value = str(value).strip()
+                boot = value or None
+            else:
+                kept[key] = value
+        pkt.options = kept
+        return boot
+
     def handle(self, pkt, raddress, rport):
         """Handle an initial WRQ packet as a server."""
         log.debug("In TftpStateServerRecvWRQ.handle")
+        boot = self._extract_boot_option(pkt)
         sendoack = self.serverInitial(pkt, raddress, rport)
         path = self.full_path
-        if self.context.upload_open:
+        receipt_store = getattr(self.context, "receipt_store", None)
+        if receipt_store is not None:
+            log.info(
+                "Recording upload of %s under receipt store (boot=%s)",
+                self.context.file_to_transfer,
+                boot,
+            )
+            self.context.receipt = receipt_store.begin_upload(
+                filename=self.context.file_to_transfer,
+                full_path=path,
+                boot=boot,
+                blksize=self.context.getBlocksize(),
+                peer="%s:%s" % (raddress, rport),
+            )
+            # The receipt owns the sink; it is opened lazily on block one.
+            self.context.fileobj = None
+        elif self.context.upload_open:
             f = self.context.upload_open(path, self.context)
             if f is None:
                 self.sendError(TftpErrors.AccessViolation)

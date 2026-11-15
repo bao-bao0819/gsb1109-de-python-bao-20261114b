@@ -65,6 +65,14 @@ def main():
         default=True,
         help="disable advisory locking on files"
     )
+    parser.add_argument(
+        "--receipts",
+        action="store_true",
+        default=False,
+        help="record upload identity (boot code, sampling round and "
+             "content digests) in the receive directory so that reboots, "
+             "re-sends and new samples are kept distinct"
+    )
     options = parser.parse_args()
 
     if options.debug:
@@ -81,7 +89,15 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    server = tftpy.TftpServer(options.root, flock=options.flock)
+    receipt_store = None
+    if options.receipts:
+        receipt_store = tftpy.TftpReceiptStore(options.root)
+
+    server = tftpy.TftpServer(
+        options.root,
+        flock=options.flock,
+        receipt_store=receipt_store,
+    )
     try:
         server.listen(options.ip, options.port)
     except tftpy.TftpException as err:

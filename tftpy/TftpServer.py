@@ -38,10 +38,17 @@ class TftpServer(TftpSession):
     file-like object ready for writing or None if the path is invalid.
 
     flock is a boolean to tell the server whether to use advisory locking
-    on any real files being read or written in the upload/download."""
+    on any real files being read or written in the upload/download.
+
+    receipt_store is an optional TftpReceiptStore (or compatible object)
+    recording the identity of every upload. When set, uploads are no longer
+    written directly to their requested paths; they are tracked as
+    observations keyed by boot code, sampling round and content digests,
+    which makes reboot resumes and re-sends distinguishable."""
 
     def __init__(self, tftproot="/tftpboot",
-                 dyn_file_func=None, upload_open=None, flock=True):
+                 dyn_file_func=None, upload_open=None, flock=True,
+                 receipt_store=None):
         self.listenip = None
         self.listenport = None
         self.sock = None
@@ -49,6 +56,7 @@ class TftpServer(TftpSession):
         self.root = os.path.abspath(tftproot)
         self.dyn_file_func = dyn_file_func
         self.upload_open = upload_open
+        self.receipt_store = receipt_store
         # A dict of sessions, where each session is keyed by a string like
         # ip:tid for the remote end.
         self.sessions = {}
@@ -64,6 +72,10 @@ class TftpServer(TftpSession):
             if attr and not callable(attr):
                 raise TftpException(
                     f"{name} supplied, but it is not callable.")
+        if receipt_store is not None and not hasattr(
+                receipt_store, "begin_upload"):
+            raise TftpException(
+                "receipt_store must provide a begin_upload() method.")
         if os.path.exists(self.root):
             log.debug("tftproot %s does exist", self.root)
             if not os.path.isdir(self.root):
@@ -182,6 +194,7 @@ class TftpServer(TftpSession):
                             self.dyn_file_func,
                             self.upload_open,
                             retries=retries,
+                            receipt_store=self.receipt_store,
                         )
                         try:
                             self.sessions[key].start(buffer)

@@ -162,7 +162,46 @@ See COPYING in this distribution.
 
 ## Limitations:
 - Only 'octet' mode is supported.
-- The only options supported are blksize and tsize.
+- The only negotiated transfer options are blksize and tsize. A WRQ may
+  additionally carry a `boot` option; it is treated as identity metadata
+  and is never echoed back in an OACK.
+
+## Upload identity receipts:
+Instruments often write every result to the same name (e.g. `RESULT.DAT`)
+and may reboot mid-transfer, restarting at block one. A `TftpReceiptStore`
+gives the receive directory a durable identity ledger so the server can
+tell new samples, re-sends and reboot resumes apart.
+
+Enable it on a server:
+
+```python
+from tftpy import TftpServer, TftpReceiptStore
+
+store = TftpReceiptStore("/tftpboot")
+server = TftpServer("/tftpboot", receipt_store=store)
+```
+
+or with the bundled server via `bin/tftpy_server.py --receipts -r /tftpboot`.
+
+Each transfer is classified on arrival of block one:
+
+- `new-sample`: no matching observation, a new sampling round is opened.
+- `resume`: a partial observation with the same boot code and identical
+  first block; the re-sent prefix is verified byte for byte before new
+  blocks are appended.
+- `resend`: a completed observation with the same boot code and first
+  block; the full stream is re-verified against the stored digest.
+
+Without a boot code, a same-name transfer whose first block matches an old
+partial is never spliced onto it: it is recorded as a separate sample. The
+evidence needed to prove such a transfer belongs to the open round is
+listed by `TftpReceiptStore.evidence_required_for_unverified()`.
+
+Completed bytes live in content-addressed blobs under `.blobs/`, with one
+hard link per observation under `observations/`. Two rounds whose contents
+are byte identical therefore remain two observations while sharing a single
+storage entity. The ledger itself is `.tftp-receipts.json`, and interrupted
+bytes are retained in `.partial/` until the observation completes.
 
 Author:
 Michael P. Soulier <msoulier@digitaltorque.ca>

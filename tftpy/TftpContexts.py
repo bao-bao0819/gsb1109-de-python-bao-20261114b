@@ -124,6 +124,9 @@ class TftpContext:
         # Flag to signal timeout error when waiting for ACK of the current block
         # and at the same time receiving duplicate ACK of previous block
         self.timeout_expectACK = False
+        # Set to True once the end-of-transfer DAT block has been received
+        # or sent, so end() can tell completion apart from interruption.
+        self.transfer_complete = False
 
     def __del__(self):
         """Simple destructor to try to call housekeeping in the end method if
@@ -167,6 +170,17 @@ class TftpContext:
             if self.flock:
                 lockfile(self.fileobj, unlock=True)
             self.fileobj.close()
+        receipt = getattr(self, "receipt", None)
+        if receipt is not None and not receipt.finalized:
+            try:
+                if self.transfer_complete:
+                    receipt.finalize()
+                else:
+                    receipt.abort()
+            except (TftpException, OSError) as err:
+                # A failed verification or storage error must not take the
+                # whole server loop down; the ledger retains forensic detail.
+                log.error("upload receipt finalization failed: %s", err)
 
     def gethost(self):
         """
@@ -254,7 +268,8 @@ class TftpContextServer(TftpContext):
         dyn_file_func=None,
         upload_open=None,
         retries=DEF_TIMEOUT_RETRIES,
-        flock=True
+        flock=True,
+        receipt_store=None,
     ):
         log.debug("TftpContextServer.__init__")
         super().__init__(host, port, timeout, retries, flock=flock)
@@ -265,6 +280,10 @@ class TftpContextServer(TftpContext):
         self.root = root
         self.dyn_file_func = dyn_file_func
         self.upload_open = upload_open
+        # Optional TftpReceiptStore identifying uploaded observations.
+        self.receipt_store = receipt_store
+        # The TftpUploadReceipt for the current upload, if any.
+        self.receipt = None
 
     def __del__(self):
         log.debug("TftpContextServer.__del__")
