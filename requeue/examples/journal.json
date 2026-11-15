@@ -1,0 +1,100 @@
+{
+  "idempotency_rule": {
+    "explicit": true,
+    "source": "export API guide v3 section 4.2",
+    "methods": ["POST"],
+    "same_key_same_body_returns_same_receipt": true,
+    "header_name": "Idempotency-Key"
+  },
+  "events": [
+    {
+      "event_id": "evt-catalog-1",
+      "kind": "request_registered",
+      "request_id": "catalog-page-2",
+      "data": {"method": "GET", "url": "/catalog?page=2"}
+    },
+    {
+      "event_id": "evt-catalog-2",
+      "kind": "attempt_headers_sent",
+      "request_id": "catalog-page-2",
+      "attempt_id": "catalog-attempt-1"
+    },
+    {
+      "event_id": "evt-export-a1",
+      "kind": "request_registered",
+      "request_id": "export-daily",
+      "data": {
+        "method": "POST",
+        "url": "/exports",
+        "body_sha256": "sha256:daily-2026-11-15-hash",
+        "idempotency_key": "export-daily-2026-11-15"
+      }
+    },
+    {
+      "event_id": "evt-export-a2",
+      "kind": "attempt_headers_sent",
+      "request_id": "export-daily",
+      "attempt_id": "export-attempt-1",
+      "data": {"body_total": 8192}
+    },
+    {
+      "event_id": "evt-export-a3",
+      "kind": "attempt_body_progress",
+      "request_id": "export-daily",
+      "attempt_id": "export-attempt-1",
+      "data": {"bytes": 1024}
+    },
+    {
+      "event_id": "evt-export-a4",
+      "kind": "request_registered",
+      "request_id": "export-weekly",
+      "data": {
+        "method": "POST",
+        "url": "/exports",
+        "body_sha256": "sha256:weekly-2026-w46-hash",
+        "idempotency_key": "export-daily-2026-11-15"
+      }
+    },
+    {
+      "event_id": "evt-export-a5",
+      "kind": "attempt_headers_sent",
+      "request_id": "export-weekly",
+      "attempt_id": "export-attempt-2"
+    },
+    {
+      "event_id": "evt-export-a6",
+      "kind": "request_registered",
+      "request_id": "export-delivered",
+      "data": {
+        "method": "POST",
+        "url": "/exports",
+        "body_sha256": "sha256:monthly-2026-11-hash",
+        "idempotency_key": "export-monthly-2026-11"
+      }
+    },
+    {
+      "event_id": "evt-export-a7",
+      "kind": "attempt_body_complete",
+      "request_id": "export-delivered",
+      "attempt_id": "export-attempt-3"
+    },
+    {
+      "event_id": "evt-export-a8",
+      "kind": "receipt_persisted",
+      "request_id": "export-delivered",
+      "attempt_id": "export-attempt-3",
+      "data": {"receipt_id": "job-4711"}
+    },
+    {
+      "event_id": "evt-export-a4",
+      "kind": "request_registered",
+      "request_id": "export-weekly",
+      "data": {
+        "method": "POST",
+        "url": "/exports",
+        "body_sha256": "sha256:weekly-2026-w46-hash",
+        "idempotency_key": "export-daily-2026-11-15"
+      }
+    }
+  ]
+}
