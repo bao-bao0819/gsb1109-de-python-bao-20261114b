@@ -37,10 +37,37 @@ Handlers
 --------
 
 .. autoclass:: frontmatter.default_handlers.BaseHandler
-    :members: 
+    :members:
 
 .. autoclass:: frontmatter.default_handlers.YAMLHandler
 
 .. autoclass:: frontmatter.default_handlers.JSONHandler
 
 .. autoclass:: frontmatter.default_handlers.TOMLHandler
+
+
+Layered metadata inheritance
+----------------------------
+
+Merge front matter across site, section and article layers while tracking
+the provenance of every value.
+
+.. autofunction:: frontmatter.merge_layers
+
+.. autoclass:: frontmatter.Layer
+    :members:
+
+.. autoclass:: frontmatter.InheritancePolicy
+    :members:
+
+.. autoclass:: frontmatter.Resolution
+    :members:
+
+.. autoclass:: frontmatter.FieldSource
+    :members:
+
+.. autoclass:: frontmatter.MetadataIndex
+    :members:
+
+.. autodata:: frontmatter.DELETE_KEY
+

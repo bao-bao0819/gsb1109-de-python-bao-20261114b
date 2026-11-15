@@ -133,3 +133,58 @@ Well, hello there, world.
 ```
 
 For more examples, see files in the `tests/` directory. Each sample file has a corresponding `.result.json` file showing the expected parsed output. See also the `examples/` directory, which covers more ways to customize input and output.
+
+## Layered metadata inheritance
+
+When content is organized in site, section and article layers, merge their
+front matter with `frontmatter.merge_layers`. An `InheritancePolicy` declares
+which fields may be explicitly cleared with `null` and which list fields merge
+per entry identifier. The returned `Resolution` carries the effective metadata
+plus the source layer of every value, and keeps parent-level removals apart
+from child-level re-adds.
+
+```python
+>>> from frontmatter import InheritancePolicy, Layer, merge_layers
+>>> policy = InheritancePolicy(
+...     clearable_fields=["summary"],
+...     keyed_lists=["references"],  # entries are identified by "id"
+... )
+>>> resolution = merge_layers([
+...     Layer("site", {"layout": "book", "summary": "site",
+...                    "references": [{"id": "r1", "title": "One"}]}),
+...     Layer("section", {"summary": None,
+...                       "references": [{"id": "r1", "_remove": True}]}),
+...     Layer("article", {"title": "Ch 1",
+...                       "references": [{"id": "r1", "title": "Two"}]}),
+... ], policy)
+>>> resolution.metadata["layout"]      # missing key inherits the parent
+'book'
+>>> "summary" in resolution.metadata   # explicit null cleared it
+False
+>>> resolution.sources["summary"]
+FieldSource(layer='section', action='cleared')
+>>> resolution.metadata["references"]  # removed by section, re-added by article
+[{'id': 'r1', 'title': 'Two'}]
+>>> [source.action for source in resolution.list_history["references"]["r1"]]
+['set', 'cleared', 'set']
+
+```
+
+`MetadataIndex` holds the whole tree. Revising a section default reports only
+the articles that actually inherit that field, so an override or an explicit
+clear is never disturbed.
+
+```python
+>>> from frontmatter import MetadataIndex
+>>> index = MetadataIndex({"layout": "book"}, policy=policy)
+>>> _ = index.add_section("math", {"author": "Ada"})
+>>> _ = index.add_article("math", "inheriting", {})
+>>> _ = index.add_article("math", "overriding", {"author": "Grace"})
+>>> affected = index.revise_section("math", {"author": "Katherine"})
+>>> sorted(affected)
+['inheriting']
+>>> index.resolve("math", "overriding").metadata["author"]
+'Grace'
+
+```
+
