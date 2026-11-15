@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata xmlns="http://musicbrainz.org/ns/mmd-2.0#">
+  <release id="11111111-0000-4000-8000-000000000001">
+    <title>Signal Fires</title>
+    <status>Official</status>
+    <date>2008-09-12</date>
+    <release-group id="11111111-0000-4000-8000-000000000011" type="Album">
+      <title>Signal Fires</title>
+      <primary-type>Album</primary-type>
+    </release-group>
+    <medium-list count="1">
+      <medium>
+        <position>1</position>
+        <format>CD</format>
+        <track-list count="3">
+          <track id="11111111-0000-4000-8000-000000000101">
+            <position>1</position>
+            <number>1</number>
+            <title>Signal Fires</title>
+            <recording id="10000000-0000-4000-8000-000000000001">
+              <title>Signal Fires</title>
+            </recording>
+          </track>
+          <track id="11111111-0000-4000-8000-000000000102">
+            <position>2</position>
+            <number>2</number>
+            <title>Grey Harbour</title>
+            <recording id="10000000-0000-4000-8000-000000000002">
+              <title>Grey Harbour</title>
+            </recording>
+          </track>
+          <track id="11111111-0000-4000-8000-000000000103">
+            <position>3</position>
+            <number>3</number>
+            <title>Paper Lanterns</title>
+            <recording id="10000000-0000-4000-8000-000000000003">
+              <title>Paper Lanterns</title>
+            </recording>
+          </track>
+        </track-list>
+      </medium>
+    </medium-list>
+  </release>
+</metadata>

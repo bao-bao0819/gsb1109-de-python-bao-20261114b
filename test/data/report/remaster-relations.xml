@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata xmlns="http://musicbrainz.org/ns/mmd-2.0#">
+  <recording-list count="3">
+    <recording id="10000000-0000-4000-8000-000000000004">
+      <title>Signal Fires</title>
+      <disambiguation>2009 remaster</disambiguation>
+      <relation-list target-type="recording">
+        <relation type="remaster" type-id="c7a2f4e8-5a80-3c1f-9d0e-0f2b1a3c4d5e">
+          <target>10000000-0000-4000-8000-000000000001</target>
+          <direction>forward</direction>
+          <recording id="10000000-0000-4000-8000-000000000001">
+            <title>Signal Fires</title>
+          </recording>
+        </relation>
+      </relation-list>
+    </recording>
+    <recording id="10000000-0000-4000-8000-000000000005">
+      <title>Grey Harbour</title>
+      <disambiguation>2009 remaster</disambiguation>
+      <relation-list target-type="recording">
+        <relation type="remaster" type-id="c7a2f4e8-5a80-3c1f-9d0e-0f2b1a3c4d5e">
+          <target>10000000-0000-4000-8000-000000000002</target>
+          <direction>forward</direction>
+          <recording id="10000000-0000-4000-8000-000000000002">
+            <title>Grey Harbour</title>
+          </recording>
+        </relation>
+      </relation-list>
+    </recording>
+    <recording id="10000000-0000-4000-8000-000000000006">
+      <title>Paper Lanterns</title>
+      <disambiguation>2009 remaster</disambiguation>
+      <relation-list target-type="recording">
+        <relation type="remaster" type-id="c7a2f4e8-5a80-3c1f-9d0e-0f2b1a3c4d5e">
+          <target>10000000-0000-4000-8000-000000000003</target>
+          <direction>forward</direction>
+          <recording id="10000000-0000-4000-8000-000000000003">
+            <title>Paper Lanterns</title>
+          </recording>
+        </relation>
+      </relation-list>
+    </recording>
+  </recording-list>
+</metadata>

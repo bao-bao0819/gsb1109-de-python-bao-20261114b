@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata xmlns="http://musicbrainz.org/ns/mmd-2.0#">
+  <release id="11111111-0000-4000-8000-000000000002">
+    <title>Signal Fires</title>
+    <status>Official</status>
+    <date>2010-05-10</date>
+    <release-group id="11111111-0000-4000-8000-000000000012" type="Single">
+      <title>Signal Fires</title>
+      <primary-type>Single</primary-type>
+    </release-group>
+    <medium-list count="1">
+      <medium>
+        <position>1</position>
+        <format>CD</format>
+        <track-list count="2">
+          <track id="11111111-0000-4000-8000-000000000201">
+            <position>1</position>
+            <number>1</number>
+            <title>Signal Fires</title>
+            <recording id="10000000-0000-4000-8000-000000000001">
+              <title>Signal Fires</title>
+            </recording>
+          </track>
+          <track id="11111111-0000-4000-8000-000000000202">
+            <position>2</position>
+            <number>2</number>
+            <title>Paper Lanterns</title>
+            <recording id="10000000-0000-4000-8000-000000000003">
+              <title>Paper Lanterns</title>
+            </recording>
+          </track>
+        </track-list>
+      </medium>
+    </medium-list>
+  </release>
+</metadata>

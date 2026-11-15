@@ -214,3 +214,54 @@ More Examples
 
 You can find some examples for using `musicbrainzngs` in the
 `examples directory <https://github.com/alastair/python-musicbrainzngs/tree/master/examples>`_.
+
+Summarising Recordings
+----------------------
+
+A recording can appear on a single, on its original album and again on a
+later remaster compilation. To report these appearances without double
+counting, build a report from data you already retrieved::
+
+  import musicbrainzngs
+
+  releases = [
+      musicbrainzngs.get_release_by_id(release_id, includes=["recordings"])
+      for release_id in release_ids
+  ]
+  recording = musicbrainzngs.get_recording_by_id(
+      remaster_recording_id, includes=["recording-rels"])
+  report = musicbrainzngs.build_recording_report(
+      releases, recordings=[recording])
+  print(report.counts())
+
+The report exposes three counts:
+
+* ``track_position_count`` counts every distinct release/medium/track
+  position. Two positions on a double-disc release are two positions.
+* ``independent_recording_count`` counts distinct recording MBIDs, so the
+  same recording reused across releases counts once. Positions without a
+  recording MBID are reported separately as
+  ``positions_without_recording_count`` rather than being guessed.
+* ``evidenced_remaster_count`` counts recordings for which a formal
+  ``remaster`` relationship exists.
+
+A title or disambiguation containing "Remastered" is only recorded as a
+title hint (``title_hint_only_count``); it never changes the counts. If a
+relationship is missing, the recording is simply reported as
+``insufficient_evidence``.
+
+When relationships are added later, compare the reports to see what the new
+evidence changed::
+
+  before = musicbrainzngs.build_recording_report(releases)
+  after = musicbrainzngs.build_recording_report(
+      releases, relations=recording_relations)
+  for line in musicbrainzngs.format_changes(
+          musicbrainzngs.compare_reports(before, after)):
+      print(line)
+
+The comparison shows unchanged counts as well, so it is clear which totals
+were affected by the evidence. The full report keeps each counted position
+and each relationship used as evidence under ``positions``, ``recordings``
+and ``relations``. ``report.to_json()`` serialises everything for an
+auditable report.

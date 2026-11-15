@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata xmlns="http://musicbrainz.org/ns/mmd-2.0#">
+  <release id="11111111-0000-4000-8000-000000000003">
+    <title>Signal Fires (Remastered Deluxe Edition)</title>
+    <status>Official</status>
+    <date>2019-11-01</date>
+    <release-group id="11111111-0000-4000-8000-000000000013" type="Album">
+      <title>Signal Fires</title>
+      <primary-type>Album</primary-type>
+      <secondary-type-list>
+        <secondary-type>Compilation</secondary-type>
+      </secondary-type-list>
+    </release-group>
+    <medium-list count="2">
+      <medium>
+        <position>1</position>
+        <format>CD</format>
+        <title>Original Album</title>
+        <track-list count="3">
+          <track id="11111111-0000-4000-8000-000000000301">
+            <position>1</position>
+            <number>1</number>
+            <title>Signal Fires</title>
+            <recording id="10000000-0000-4000-8000-000000000001">
+              <title>Signal Fires</title>
+            </recording>
+          </track>
+          <track id="11111111-0000-4000-8000-000000000302">
+            <position>2</position>
+            <number>2</number>
+            <title>Grey Harbour</title>
+            <recording id="10000000-0000-4000-8000-000000000002">
+              <title>Grey Harbour</title>
+            </recording>
+          </track>
+          <track id="11111111-0000-4000-8000-000000000303">
+            <position>3</position>
+            <number>3</number>
+            <title>Paper Lanterns</title>
+            <recording id="10000000-0000-4000-8000-000000000003">
+              <title>Paper Lanterns</title>
+            </recording>
+          </track>
+        </track-list>
+      </medium>
+      <medium>
+        <position>2</position>
+        <format>CD</format>
+        <title>Remastered Album</title>
+        <track-list count="5">
+          <track id="11111111-0000-4000-8000-000000000401">
+            <position>1</position>
+            <number>1</number>
+            <title>Signal Fires</title>
+            <recording id="10000000-0000-4000-8000-000000000004">
+              <title>Signal Fires</title>
+              <disambiguation>2009 remaster</disambiguation>
+            </recording>
+          </track>
+          <track id="11111111-0000-4000-8000-000000000402">
+            <position>2</position>
+            <number>2</number>
+            <title>Grey Harbour</title>
+            <recording id="10000000-0000-4000-8000-000000000005">
+              <title>Grey Harbour</title>
+              <disambiguation>2009 remaster</disambiguation>
+            </recording>
+          </track>
+          <track id="11111111-0000-4000-8000-000000000403">
+            <position>3</position>
+            <number>3</number>
+            <title>Paper Lanterns</title>
+            <recording id="10000000-0000-4000-8000-000000000006">
+              <title>Paper Lanterns</title>
+              <disambiguation>2009 remaster</disambiguation>
+            </recording>
+          </track>
+          <track id="11111111-0000-4000-8000-000000000404">
+            <position>4</position>
+            <number>4</number>
+            <title>Signal Fires</title>
+            <recording id="10000000-0000-4000-8000-000000000001">
+              <title>Signal Fires</title>
+            </recording>
+          </track>
+          <track id="11111111-0000-4000-8000-000000000405">
+            <position>5</position>
+            <number>5</number>
+            <title>Signal Fires (Remastered)</title>
+            <recording id="10000000-0000-4000-8000-000000000007">
+              <title>Signal Fires (Remastered)</title>
+            </recording>
+          </track>
+        </track-list>
+      </medium>
+    </medium-list>
+  </release>
+</metadata>

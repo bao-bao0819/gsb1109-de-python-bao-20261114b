@@ -1,3 +1,8 @@
+unreleased:
+    * added build_recording_report() to count track positions, independent
+      recordings and formally evidenced remaster versions across retrieved
+      releases, with compare_reports() for evidence-driven count changes
+
 0.7.1 (2020-01-11):
     * include README file in pypi
 

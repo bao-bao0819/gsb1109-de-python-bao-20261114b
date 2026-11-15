@@ -188,3 +188,25 @@ You can enable this output in your application with::
     logging.basicConfig(level=logging.DEBUG)
     # optionally restrict musicbrainzngs output to INFO messages
     logging.getLogger("musicbrainzngs").setLevel(logging.INFO)
+
+Reporting
+---------
+
+These functions summarise data that has already been retrieved from the
+web service, without making further requests. They keep track of the
+individual release/medium/track positions and the formal recording
+relationships behind every count.
+
+.. autofunction:: build_recording_report
+.. autofunction:: compare_reports
+.. autofunction:: format_changes
+.. autofunction:: format_report
+
+.. autoclass:: RecordingReport
+   :members:
+
+.. autoclass:: ReportComparison
+   :members:
+
+.. autoclass:: CountChange
+   :members:
