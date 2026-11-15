@@ -54,6 +54,24 @@ The valid includes are listed for each function.
 .. autofunction:: get_collections
 .. autofunction:: get_releases_in_collection
 
+Disc IDs and Box Sets
+---------------------
+
+These helpers work offline on the parsed result of
+:func:`musicbrainzngs.get_releases_by_discid` and help match a recovered
+table of contents against release and medium data.
+
+.. autofunction:: claim_whole_box
+.. autofunction:: normalize_toc
+.. autofunction:: toc_string
+.. autofunction:: toc_geometry
+.. autofunction:: tocs_match
+.. autofunction:: medium_toc
+.. autofunction:: distinguishing_disc_numbers
+
+.. autodata:: musicbrainzngs.toc.PREGAP_SECTORS
+.. autodata:: musicbrainzngs.toc.SECTORS_PER_SECOND
+
 .. autodata:: musicbrainzngs.musicbrainz.VALID_RELEASE_TYPES
 .. autodata:: musicbrainzngs.musicbrainz.VALID_RELEASE_STATUSES
 

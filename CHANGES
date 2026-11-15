@@ -1,3 +1,8 @@
+0.7.2 (unreleased):
+    * added musicbrainzngs.toc with claim_whole_box() for offline matching
+      of a recovered TOC against releases and mediums, including multi-disc
+      box sets, data discs and pre-gap tracks
+
 0.7.1 (2020-01-11):
     * include README file in pypi
 

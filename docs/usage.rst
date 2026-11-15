@@ -84,6 +84,39 @@ with adding `includes` and you filter releases and release_groups::
    If you want to fetch all release groups you will have to
    `browse <browsing>`_.
 
+Disc IDs and Box Sets
+^^^^^^^^^^^^^^^^^^^^^
+
+A single Disc ID is often attached to several releases, for example the same
+album issued in different countries. A release can also contain several
+mediums. If all you recovered from a box is the table of contents (TOC) of
+each disc, use :func:`musicbrainzngs.claim_whole_box` to decide which
+releases the box can still be. It works entirely offline on the parsed
+result of :func:`musicbrainzngs.get_releases_by_discid`::
+
+  result = musicbrainzngs.get_releases_by_discid(disc_id,
+                includes=["recordings"])
+  claim = musicbrainzngs.claim_whole_box(discid_result=result)
+  for release in claim["release-claims"]:
+      print(release["country"], release["status"])
+  print("still possible:", claim["still-valid"])
+  print("check these discs:", claim["discriminating"]["disc-numbers"])
+
+If you know that several recovered discs came from the same box, pass their
+TOCs together. They are matched to distinct mediums, and their disc order is
+worked out rather than assumed::
+
+  claim = musicbrainzngs.claim_whole_box(toc=disc_one,
+                same_box=[disc_two, disc_three], discid_result=result)
+
+Relative track offsets and the total programme length are compared first;
+absolute offsets and the leadout are ignored by default, so different
+amounts of hidden content before track 1 do not break the match. A release
+that only accounts for one disc of a multi-disc box is reported as
+``partial`` and is not confirmed. Data-only mediums carry no audio TOC and
+are exempt, while a declared pre-gap track is compared with the hidden
+content of the local TOC (use ``require_pregap=True`` to reject a mismatch).
+
 Cover Art Data
 ^^^^^^^^^^^^^^
 
