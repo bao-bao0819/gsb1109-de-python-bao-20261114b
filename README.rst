@@ -206,6 +206,36 @@ see the ``NodeVisitor`` example in `examples/func_defs.py <examples/func_defs.py
 There's also a `FAQ available here <https://github.com/eliben/pycparser/wiki/FAQ>`_.
 In any case, you can always drop me an `email <eliben@gmail.com>`_ for help.
 
+Comparing enum dictionaries
+---------------------------
+
+``pycparser.enum_diff`` evaluates enumerators from two preprocessed declaration
+files and compares the resulting name/value maps. This is useful for event-code
+enums, where members are reordered or aliased but the numbers on the wire must
+stay stable::
+
+    from pycparser.enum_diff import diff_files
+
+    result = diff_files("events-old.h", "events-new.h")
+    print(result.compatible)
+    for change in result.value_changes:
+        print(change["name"], change["old"], "->", change["new"])
+
+Explicit enumerator expressions may reference earlier enumerators, and implicit
+values continue from the last assigned value. Names sharing one value form an
+alias group; without a designated primary name the whole group is compared as a
+set, so moving aliases between lines is not reported as a source break. A
+``#pragma primary NAME`` (or ``primary_names=`` argument) designates the
+canonical name. The same comparison is available from the command line::
+
+    python -m pycparser.enum_diff old.h new.h
+    python -m pycparser.enum_diff --format json old.h new.h
+    python -m pycparser.enum_diff --dialect c23 old.h new.h
+
+The command exits with 0 when compatible, 1 when a name changed value, and 2 on
+an input or evaluation error. Enums from different ``#line`` header files are
+reported separately, and an unnamed typedef enum uses its typedef name.
+
 
 Modifying
 =========
