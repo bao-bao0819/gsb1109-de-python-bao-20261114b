@@ -69,6 +69,31 @@ Cover Art
 .. autofunction:: get_release_group_image_front
 .. autofunction:: get_image_back
 
+.. _sync_api:
+
+Incremental Sync
+----------------
+
+:class:`SyncArchive` keeps a local archive of entity lookups so that
+relations can be synchronised incrementally.
+When an entity has been merged, the lookup of the old MBID returns the
+entity's new MBID; the archive records this redirect so history can be
+queried with the new MBID while every record keeps the MBID that was
+actually requested.
+A lookup only replaces the relation scopes named in its ``includes``;
+only an explicitly fetched empty relation list clears a scope.
+Redirects that would form a cycle leave the affected entities on the
+review queue while all other entities keep updating.
+Replaying archived responses up to a point in time reproduces the
+relation view as it was known then.
+
+.. autoclass:: musicbrainzngs.sync.SyncArchive
+   :members:
+
+.. autoclass:: musicbrainzngs.sync.ArchiveRecord
+
+.. autoexception:: musicbrainzngs.sync.RedirectCycle
+
 
 .. _search_api:
 
