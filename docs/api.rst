@@ -44,3 +44,10 @@ Handlers
 .. autoclass:: frontmatter.default_handlers.JSONHandler
 
 .. autoclass:: frontmatter.default_handlers.TOMLHandler
+
+
+Subscriptions
+-------------
+
+.. automodule:: frontmatter.subscriptions
+    :members:
